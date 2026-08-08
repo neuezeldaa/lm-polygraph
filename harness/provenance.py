@@ -116,6 +116,21 @@ def report(config: Path, expect: str = None) -> dict:
     print(f"  generation       : {info['generation_params']}  max_new_tokens={info['max_new_tokens']}")
     print(f"  n (subsample)    : {info['subsample']}   batch_size={info['batch_size']}   seed={info['seed']}")
     print(f"  n estimators     : {info['n_estimators']}")
+    print("-" * 68)
+    # fp32_projection changes the method's numerics, so it is REPORTED, not a
+    # silent default. "dE needs an fp32 projection to be stable on a T4" is part
+    # of the finding, and a reader has to know the numbers were produced with it.
+    try:
+        from lm_polygraph.stat_calculators.energy import EnergyCalculator
+
+        ec = EnergyCalculator()
+        print(f"  EnergyCalculator : fp32_projection={ec.fp32_projection}, "
+              f"vocab_chunk={ec.vocab_chunk}")
+        if ec.fp32_projection:
+            print("                     (vocabulary projection redone in float32 for")
+            print("                      the scored rows; dE amplifies logit error ~6.5x)")
+    except Exception as e:
+        print(f"  EnergyCalculator : could not introspect ({e})")
     print("=" * 68)
 
     if expect and info["model_path"] != expect:

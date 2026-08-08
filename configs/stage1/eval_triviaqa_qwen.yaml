@@ -71,6 +71,13 @@ save_stats:
   - greedy_texts
   - greedy_tokens
   - greedy_log_likelihoods
+  # Persisted so the WITHIN-PASS invariant can be checked on real data:
+  # tok - lse is a log-probability and must be <= 0 for every token. That one is
+  # exact by construction, unlike the cross-pass identity against
+  # greedy_log_likelihoods, which legitimately diverges in fp16 because the two
+  # sides come from different forward passes.
+  - energy_token_logits
+  - energy_lse
 
 # MUST stay false. transformers only applies its left-padding NaN guard
 # (AttentionMaskConverter._unmask_unattended) when the attention implementation

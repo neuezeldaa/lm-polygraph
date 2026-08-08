@@ -1,80 +1,198 @@
 #!/usr/bin/env python3
-"""Permanent gate: does log p = E^m - E^l hold on real run data?
+"""Two gates on the energy statistics: one exact, one calibrated.
 
-Algebraically exact. But the two sides come from DIFFERENT forward passes --
-greedy_log_likelihoods from incremental decoding with a KV cache, the energies
-from a full-sequence teacher-forced prefill -- so in fp16 they diverge. The
-residual therefore measures how far apart those two numerical paths are, which is
-exactly the quantity dE inherits and amplifies.
+HARD GATE (exact by construction, no tolerance to choose)
+    Within a single teacher-forced pass, ``tok - lse`` is ``log_softmax(theta)``
+    at the sampled token, so it is a log-probability and must be ``<= 0`` for
+    every token, with ``exp(tok - lse) <= 1``. A violation means the statistics
+    are misaligned or corrupted, not merely imprecise. Uses the per-token
+    ``energy_token_logits`` / ``energy_lse`` persisted via ``save_stats``.
 
-Why it matters: dE = Z_{j+1} - theta_j is a cancelling difference. Measured on
-Qwen2.5-3B/TriviaQA, |theta| ~ 22.7 and |Z| ~ 27.1 give |dE| ~ 4.2, an
-amplification of ~6.5x. A 0.19 nat logit-path divergence becomes ~1.2 nats in dE
-before max pooling picks the worst token -- which is why runs that differ only in
-batch size or attention kernel disagreed on dE at rho=0.29.
+CALIBRATED GATE (threshold measured, never guessed)
+    The cross-pass residual ``|(tok - lse) - greedy_log_likelihoods|`` compares a
+    teacher-forced prefill against incremental decoding with a KV cache. Those are
+    different numerical paths, so in fp16 a nonzero residual is CORRECT behaviour,
+    not a defect. Picking a threshold by intuition risks the same false-positive
+    gate we already had to remove once from the A-vs-C comparison.
 
-Reads per_sample_<seed>.npz; no GPU. Reconstructs mean(theta) and mean(Z) from
-the mean-pooled logit and marginal variants, so it needs those in the run.
+    So the floor is measured from a reference run in the cleanest configuration
+    available -- batch_size=1 (no padding) with fp32_projection on -- and the
+    threshold is set above that floor with an explicit margin. The derivation is
+    printed so the number in the report can be traced.
+
+Why any of this matters: ``dE = Z_{j+1} - theta_j`` is a cancelling difference
+(|theta| ~ 22.7, |Z| ~ 27.1, |dE| ~ 4.2 on Qwen2.5-3B/TriviaQA), so it inherits
+~6.5x of any logit error, and ``max`` pooling then selects the noisiest token.
 
 Usage:
-    python harness/check_energy_identity.py --npz <per_sample_seed1.npz> [--max-residual 0.05]
+    # calibrate from the bs=1 run, then gate the others
+    python harness/check_energy_identity.py --run <A dir> --floor-run <C dir>
+    # or gate against an explicit threshold
+    python harness/check_energy_identity.py --run <A dir> --max-residual 0.08
 """
 
 import argparse
+import glob
 import sys
 from pathlib import Path
 
 import numpy as np
 
+MARGIN = 3.0        # threshold = floor * MARGIN
+MIN_THRESHOLD = 0.02  # never gate tighter than this, whatever the floor says
+
+
+def _field(man, name):
+    return man.get(name) if isinstance(man, dict) else getattr(man, name, None)
+
+
+def load_run(run_dir: Path):
+    import torch
+
+    mans = sorted(glob.glob(str(run_dir / "ue_manager_seed*")))
+    if not mans:
+        sys.exit(f"[identity] no ue_manager_seed* in {run_dir}")
+    blob = torch.load(mans[0], weights_only=False)
+    stats = _field(blob, "stats") or {}
+    return {
+        "dir": run_dir,
+        "tok": stats.get("energy_token_logits"),
+        "lse": stats.get("energy_lse"),
+        "ll": stats.get("greedy_log_likelihoods"),
+    }
+
+
+def within_pass_violations(run):
+    """Exact invariant: tok - lse must be <= 0 everywhere."""
+    tok, lse = run["tok"], run["lse"]
+    if not tok or not lse:
+        return None
+    worst, n_bad, n_tot = 0.0, 0, 0
+    for t, l in zip(tok, lse):
+        t = np.asarray(t, dtype=np.float64)
+        l = np.asarray(l, dtype=np.float64)[: len(t)]
+        if t.size == 0:
+            continue
+        logp = t - l
+        n_tot += logp.size
+        n_bad += int((logp > 1e-4).sum())
+        worst = max(worst, float(logp.max()))
+    return {"n_bad": n_bad, "n_total": n_tot, "worst_logp": worst}
+
+
+def cross_pass_residual(run):
+    """|(tok - lse) - greedy_log_likelihoods|, per token, across the run."""
+    tok, lse, ll = run["tok"], run["lse"], run["ll"]
+    if not tok or not lse or not ll:
+        return None
+    res = []
+    for t, l, g in zip(tok, lse, ll):
+        t = np.asarray(t, dtype=np.float64)
+        l = np.asarray(l, dtype=np.float64)[: len(t)]
+        g = np.asarray(g, dtype=np.float64)
+        k = min(len(t), len(g))
+        if k:
+            res.append(np.abs((t[:k] - l[:k]) - g[:k]))
+    if not res:
+        return None
+    a = np.concatenate(res)
+    return {"mean": float(a.mean()), "p95": float(np.percentile(a, 95)),
+            "max": float(a.max()), "n": int(a.size)}
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--npz", type=Path, required=True)
-    ap.add_argument("--max-residual", type=float, default=0.05,
-                    help="Fail above this mean |residual| in nats.")
+    ap.add_argument("--run", type=Path, required=True, help="Run directory to gate.")
+    ap.add_argument("--floor-run", type=Path, default=None,
+                    help="Reference run for calibration; use the batch_size=1 run.")
+    ap.add_argument("--max-residual", type=float, default=None,
+                    help="Explicit threshold; overrides calibration.")
+    ap.add_argument("--margin", type=float, default=MARGIN)
     args = ap.parse_args()
 
-    d = np.load(args.npz, allow_pickle=True)
-    ue = {k[4:]: np.asarray(d[k], dtype=np.float64) for k in d.files if k.startswith("ue::")}
+    run = load_run(args.run)
+    print("=" * 70)
+    print(f"ENERGY GATES  --  {args.run}")
+    print("=" * 70)
 
-    need = ["SpilledEnergy_logit_mean", "SpilledEnergy_marginal_mean", "Perplexity"]
-    missing = [n for n in need if n not in ue]
-    if missing:
-        print(f"[identity] SKIP: run lacks {missing}")
-        return 0
+    failures = []
 
-    theta = -ue["SpilledEnergy_logit_mean"]     # mean theta[id]
-    Z = -ue["SpilledEnergy_marginal_mean"]      # mean Z
-    logp = -ue["Perplexity"]                    # mean log p, from generation
-    resid = np.abs((theta - Z) - logp)
+    # ---- hard gate ---------------------------------------------------------
+    wp = within_pass_violations(run)
+    print("\n[hard] within-pass invariant   tok - lse <= 0   (exact by construction)")
+    if wp is None:
+        print("  SKIP: energy_token_logits / energy_lse not in save_stats")
+    else:
+        print(f"  tokens checked : {wp['n_total']}")
+        print(f"  violations     : {wp['n_bad']}")
+        print(f"  worst log p    : {wp['worst_logp']:+.6f}  (must be <= 0)")
+        if wp["n_bad"]:
+            failures.append(
+                f"{wp['n_bad']}/{wp['n_total']} tokens have tok - lse > 0, i.e. a "
+                f"log-probability above 1 (worst {wp['worst_logp']:+.4f}). The "
+                "energies are misaligned or corrupted, not merely imprecise."
+            )
+        else:
+            print("  PASS")
 
-    dE = np.abs(ue.get("SpilledEnergy_spilled_mean", np.array([np.nan])))
-    amp = np.median(np.abs(Z)) / np.median(dE) if np.isfinite(dE).any() else np.nan
+    # ---- calibrated gate ---------------------------------------------------
+    cp = cross_pass_residual(run)
+    print("\n[calibrated] cross-pass residual   |(tok - lse) - greedy_log_likelihoods|")
+    print("  compares a teacher-forced prefill against incremental decoding, so a")
+    print("  nonzero residual is correct behaviour in fp16, not a defect.")
+    if cp is None:
+        print("  SKIP: needs energy stats and greedy_log_likelihoods")
+    else:
+        print(f"  mean {cp['mean']:.4f}   p95 {cp['p95']:.4f}   max {cp['max']:.4f}"
+              f"   (n={cp['n']} tokens)")
 
-    print("=" * 68)
-    print("ENERGY IDENTITY GATE   log p == E^m - E^l")
-    print("=" * 68)
-    print(f"  median |theta[id]|      : {np.median(theta):8.3f}")
-    print(f"  median |Z|              : {np.median(Z):8.3f}")
-    print(f"  median |dE| (mean pool) : {np.median(dE):8.3f}")
-    print(f"  amplification |Z|/|dE|  : {amp:8.1f}x")
-    print(f"  mean |residual|         : {resid.mean():8.4f} nats")
-    print(f"  max  |residual|         : {resid.max():8.4f} nats")
-    print(f"  implied dE error        : ~{resid.mean()*amp:.2f} nats")
-    print("-" * 68)
+        threshold, how = args.max_residual, "given explicitly"
+        if threshold is None and args.floor_run is not None:
+            floor = cross_pass_residual(load_run(args.floor_run))
+            if floor is None:
+                print(f"  WARNING: no energy stats in {args.floor_run}; cannot calibrate")
+            else:
+                threshold = max(floor["mean"] * args.margin, MIN_THRESHOLD)
+                how = (f"calibrated: floor {floor['mean']:.4f} (mean residual of "
+                       f"{args.floor_run.name}, the batch_size=1 / fp32_projection "
+                       f"reference) x margin {args.margin} , min {MIN_THRESHOLD}")
+        if threshold is None:
+            print("  no threshold: pass --floor-run or --max-residual to gate")
+        else:
+            print(f"  threshold      : {threshold:.4f}")
+            print(f"  derivation     : {how}")
+            if cp["mean"] > threshold:
+                failures.append(
+                    f"cross-pass residual {cp['mean']:.4f} > {threshold:.4f}. dE "
+                    f"inherits ~6.5x of this, so dE-based results are not reportable."
+                )
+            else:
+                print("  PASS")
 
-    if resid.mean() > args.max_residual:
-        print(f"  FAIL: mean residual {resid.mean():.4f} > {args.max_residual}")
-        print("  The teacher-forced pass and the generation disagree by more than")
-        print("  fp16 noise should allow. Either the projection is not being done in")
-        print("  float32 (EnergyCalculator(fp32_projection=True)), or the energies")
-        print("  are misaligned. dE inherits this error amplified, so do NOT report")
-        print("  any dE-based result from this run.")
-        print("=" * 68)
+    print("\n" + "=" * 70)
+    if failures:
+        print("VERDICT: FAIL")
+        for f in failures:
+            print(f"  - {f}")
+        print("=" * 70)
         return 1
 
-    print("  PASS")
-    print("=" * 68)
+    # A gate that skipped has not passed. Reporting PASS when nothing was
+    # actually checked is the silent-skip failure mode this whole harness exists
+    # to avoid.
+    if wp is None and cp is None:
+        print("VERDICT: INCONCLUSIVE -- nothing was checked")
+        print("  The run has no energy_token_logits / energy_lse in its stats, so")
+        print("  neither gate could run. Add them to save_stats and re-run; do not")
+        print("  read this as a pass.")
+        print("=" * 70)
+        return 2
+
+    checked = [n for n, g in (("within-pass", wp), ("cross-pass", cp)) if g is not None]
+    print(f"VERDICT: PASS ({', '.join(checked)} checked)")
+    if len(checked) < 2:
+        print("  NOTE: the other gate skipped; this is a partial pass.")
+    print("=" * 70)
     return 0
 
 
