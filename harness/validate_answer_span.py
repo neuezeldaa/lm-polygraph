@@ -104,10 +104,12 @@ def main():
     else:
         print("  exact match vs gold      : no Accuracy metric in manager")
 
-    print(f"\n=== first {args.show} generations (repr) ===")
+    # ascii() rather than repr(): a narrow console codepage must not be able to
+    # crash this before the verdict and the json below are written.
+    print(f"\n=== first {args.show} generations ===")
     for t in texts[: args.show]:
         shown = t if len(t) < 90 else t[:90] + "..."
-        print(f"  {shown!r}")
+        print(f"  {ascii(shown)}")
 
     verdict_ok = (single_line / n > 0.90) and (at_ceiling / n < 0.10) and (empty / n < 0.05)
     print("\n=== verdict ===")

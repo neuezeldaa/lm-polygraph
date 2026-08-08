@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -134,6 +135,7 @@ def run_eval(config, save_dir, samples, seed, extra_overrides):
     cmd = ["polygraph_eval", *overrides]
     print(f"[run] HYDRA_CONFIG={config}")
     print(f"[run] {' '.join(cmd)}")
+    t0 = time.time()
     try:
         proc = subprocess.run(cmd, env=env)
     except FileNotFoundError:
@@ -145,8 +147,20 @@ def run_eval(config, save_dir, samples, seed, extra_overrides):
             "  or run the module directly:\n"
             "    HYDRA_CONFIG=<cfg> python <repo>/scripts/polygraph_eval"
         )
+    elapsed = time.time() - t0
     if proc.returncode != 0:
         sys.exit(f"[run] polygraph_eval failed with code {proc.returncode}")
+
+    # Record wall-clock so a long run can be projected from a short one BEFORE
+    # committing to it (harness/estimate_runtime.py).
+    meta = {
+        "elapsed_sec": round(elapsed, 1),
+        "n": samples,
+        "config": str(config),
+        "save_dir": str(save_dir),
+    }
+    (save_dir / "run_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print(f"[run] wall clock {elapsed/60:.1f} min  ->  {save_dir / 'run_meta.json'}")
 
 
 def preflight_config(config: Path, expect_model: str = None):
