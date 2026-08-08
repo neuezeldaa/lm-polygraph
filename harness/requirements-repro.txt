@@ -1,30 +1,45 @@
 # =============================================================================
-# Stage 1 reproducibility pin — Spilled Energy on lm-polygraph
+# Stage 1 reproducibility pins — Spilled Energy on lm-polygraph
 #
-# Target runtime: free Google Colab / Kaggle T4 (16 GB, CUDA 12.x, fp16, no FA2).
-# lm-polygraph itself is installed from the pinned commit below (editable clone),
-# which pulls its own requirements.txt; this file pins the versions that matter
-# for reproducibility on top of that.
+# Target runtime: free Google Colab / Kaggle T4 (16 GB, fp16, no FlashAttention-2).
 #
 # lm-polygraph commit: efea882d810d07770e71d3a80e02416d09751435  (2026-08-04)
-#   git clone https://github.com/IINemo/lm-polygraph
-#   git -C lm-polygraph checkout efea882d810d07770e71d3a80e02416d09751435
+#   git clone --branch spilled-energy-experiments https://github.com/neuezeldaa/lm-polygraph
 #   pip install -e lm-polygraph
-#   pip install -r lm-polygraph/requirements-repro.txt
+#   pip install -r lm-polygraph/harness/requirements-repro.txt
 #
-# Install torch FIRST with the CUDA 12.4 wheel index (see notebooks/stage1_colab_t4.ipynb):
-#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-# =============================================================================
+# TORCH IS DELIBERATELY NOT PINNED TO AN EXACT VERSION.
+# An earlier revision pinned torch==2.6.0, which forced a multi-GB downgrade of
+# Colab's preinstalled build and broke three things at once:
+#   * torchvision (Colab ships 0.26.0+cu128, which expects torch 2.11)
+#   * the CUDA build stopped matching the host driver
+#   * the kernel kept the pre-install torch while every subprocess got the new
+#     one -- a silent in-process/subprocess version split
+# Upstream itself only requires torch>=2.6.0, and Colab's build already
+# satisfies that and is driver-matched. Reproducibility comes from RECORDING the
+# version actually used (harness/provenance.py prints it, and the notebook
+# asserts the in-process version matches what is installed on disk), not from
+# forcing a downgrade that fights the platform.
+torch>=2.6.0
 
-torch==2.6.0
+# These are pinned exactly: the transformers version changes generation
+# behaviour, and the datasets version changes loader semantics. Both are small
+# downloads, so pinning them costs little.
 transformers==4.50.0
 tokenizers>=0.21,<0.22
-datasets==2.21.0            # <3.0: avoids the removal of script-based dataset loaders
+datasets==2.21.0            # <3.0: keeps script-based dataset loaders available
 accelerate==1.4.0
-numpy==1.26.4              # <2.0 for broad compatibility with the pinned torch/transformers
+numpy>=1.26,<2.0            # <2.0 for compatibility with the pinned transformers
 hydra-core==1.3.2
 omegaconf==2.3.0
-sentencepiece==0.2.0
 safetensors>=0.4.5
-rouge-score==0.1.2         # AccuracyMetric path only needs stdlib, but repo imports these at module load
+
+# Not used by Qwen2.5 (Qwen2TokenizerFast is BPE: vocab.json + merges.txt, and
+# loads no sentencepiece module), but lm-polygraph declares >=0.2.1 and an
+# earlier revision of this file pinned 0.2.0 -- below the declared minimum,
+# which made the resolver complain about the library not satisfying itself.
+sentencepiece>=0.2.1
+
+# Imported at module load by lm_polygraph.generation_metrics
+rouge-score>=0.1.2
 sacrebleu>=2.4.0

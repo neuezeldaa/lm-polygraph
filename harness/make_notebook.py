@@ -31,39 +31,50 @@ code = lambda s: cells.append(new_code_cell(s))
 md(
     "# Spilled Energy — TriviaQA on a T4\n"
     "\n"
-    "Run the cells **in order**. Each gate is designed to fail fast and loudly:\n"
-    "a bad prompt format, a silent model swap, or drifting generations all stop the\n"
-    "notebook rather than producing numbers that look fine and mean nothing.\n"
+    "**Runtime → Change runtime type → T4 GPU**, then `Runtime → Run all`.\n"
     "\n"
-    "Two runs, deliberately: the **primary baseline table** and the **ablation\n"
-    "ladder**. Both save to Drive as they finish, and cell 11 asserts they saw\n"
-    "byte-identical generations — otherwise the two tables are not comparable.\n"
+    "The notebook restarts its own kernel once, after the install (cell 5). That is\n"
+    "not optional: `pip install -e .` writes an `__editable__*.pth` into\n"
+    "site-packages, and `.pth` files are only processed at interpreter startup, so\n"
+    "`lm_polygraph` cannot be imported in a kernel that was already running. After\n"
+    "the restart, just **run all again from the top** — every setup cell is\n"
+    "idempotent and the second pass takes seconds.\n"
     "\n"
-    "**Runtime → Change runtime type → T4 GPU** before starting."
+    "Each gate fails fast and loudly: a stale module, a silent model swap, a bad\n"
+    "prompt format, or drifting generations all stop the notebook rather than\n"
+    "producing numbers that look fine and mean nothing."
 )
 
 # 1 --------------------------------------------------------------------------
-md("## 1. Confirm you actually got a T4\n\nColab hands out different accelerators. Check before spending an hour.")
+md(
+    "## 1. Confirm you actually got a T4\n"
+    "\n"
+    "Deliberately does **not** import torch. The install can change the torch version,\n"
+    "and a module imported now would stay bound in this kernel while every subprocess\n"
+    "got the new one — exactly the split this notebook exists to avoid. torch is\n"
+    "asserted in cell 7, after the restart."
+)
 code(
-    "import torch, subprocess\n"
-    "print(subprocess.run(['nvidia-smi','--query-gpu=name,memory.total,memory.free,driver_version',\n"
-    "                      '--format=csv'], capture_output=True, text=True).stdout)\n"
-    "assert torch.cuda.is_available(), 'No GPU! Runtime -> Change runtime type -> T4 GPU'\n"
-    "name = torch.cuda.get_device_name(0)\n"
-    "free, total = torch.cuda.mem_get_info()\n"
-    "print(f'device    : {name}')\n"
-    "print(f'VRAM free : {free/1e9:.2f} GB / {total/1e9:.2f} GB')\n"
-    "if 'T4' not in name:\n"
-    "    print(f'\\nWARNING: expected a T4, got {name!r}. Results stay valid; timings differ.')"
+    "import subprocess\n"
+    "out = subprocess.run(['nvidia-smi',\n"
+    "                      '--query-gpu=name,memory.total,memory.free,driver_version',\n"
+    "                      '--format=csv'], capture_output=True, text=True).stdout\n"
+    "print(out)\n"
+    "assert out.strip(), 'nvidia-smi produced nothing: Runtime -> Change runtime type -> T4 GPU'\n"
+    "if 'T4' not in out:\n"
+    "    print('WARNING: expected a T4. Results stay valid; timings will differ.')"
 )
 
 # 2 --------------------------------------------------------------------------
 md(
-    "## 2. Mount Drive\n"
+    "## 2. Mount Drive  *(idempotent)*\n"
     "\n"
     "Every run writes **straight to Drive**. lm-polygraph saves the manager inside a\n"
-    "`finally:` block, so a run that raises still leaves its results behind, and each\n"
-    "run lands before the next begins — a disconnect costs one run, not all of them."
+    "`finally:` block, so even a run that raises leaves its results behind, and each\n"
+    "run lands before the next starts — a disconnect costs one run, not all of them.\n"
+    "\n"
+    "The mount is a VM-level FUSE process, so it survives the kernel restart;\n"
+    "re-running this cell then just reports it is already mounted."
 )
 code(
     "from google.colab import drive\n"
@@ -78,11 +89,14 @@ code(
 
 # 3 --------------------------------------------------------------------------
 md(
-    "## 3. Clone the experiments branch\n"
+    "## 3. Clone the experiments branch  *(idempotent)*\n"
     "\n"
     "`spilled-energy-experiments` = the PR branch **plus** `harness/` and this notebook.\n"
     "The PR is opened from `spilled-energy`, which holds only the StatCalculator, the\n"
-    "Estimator, the tests and the configs."
+    "Estimator, the tests and the configs.\n"
+    "\n"
+    "Guarded on `isdir`, so the second pass is instant. It also pulls, so re-running\n"
+    "the notebook picks up any pushed fixes without a fresh clone."
 )
 code(
     f"REPO_URL = {REPO_URL!r}\n"
@@ -92,59 +106,176 @@ code(
     "import os\n"
     "if not os.path.isdir(REPO):\n"
     "    !git clone --branch $BRANCH $REPO_URL $REPO\n"
+    "else:\n"
+    "    print('already cloned; pulling latest')\n"
+    "    !git -C $REPO pull --ff-only origin $BRANCH\n"
     "%cd $REPO\n"
     "!git log -1 --oneline"
 )
 
 # 4 --------------------------------------------------------------------------
 md(
-    "## 4. Install, and set PYTHONPATH explicitly\n"
+    "## 4. Environment paths  *(idempotent, must run in every kernel)*\n"
     "\n"
-    "`PYTHONPATH` is set here rather than left to chance: the ablation ladder loads\n"
-    "`harness.pooled_baseline` by dotted path from inside a `polygraph_eval`\n"
-    "subprocess, which does not inherit the notebook's `sys.path`."
+    "`PYTHONPATH` carries the repo root so a `polygraph_eval` subprocess can import\n"
+    "`harness.pooled_baseline` by dotted path. Environment variables do **not** survive\n"
+    "a kernel restart, so this cell has to run again on the second pass — which is why\n"
+    "it is separate from the install."
 )
 code(
-    "!pip install -q -e .\n"
-    "!pip install -q -r harness/requirements-repro.txt\n"
-    "\n"
     "import os, sys, sysconfig\n"
     "os.environ['PYTHONPATH'] = REPO + os.pathsep + os.environ.get('PYTHONPATH', '')\n"
-    "os.environ['PATH'] = os.environ['PATH'] + os.pathsep + sysconfig.get_path('scripts')\n"
+    "scripts = sysconfig.get_path('scripts')\n"
+    "if scripts not in os.environ['PATH']:\n"
+    "    os.environ['PATH'] = os.environ['PATH'] + os.pathsep + scripts\n"
     "if REPO not in sys.path:\n"
     "    sys.path.insert(0, REPO)\n"
-    "print('PYTHONPATH =', os.environ['PYTHONPATH'])\n"
-    "!which polygraph_eval || echo 'NOTE: not on PATH; run_baselines.py prints a fallback'"
+    "print('PYTHONPATH =', os.environ['PYTHONPATH'])"
 )
 
 # 5 --------------------------------------------------------------------------
 md(
-    "## 5. Fail-fast import check\n"
+    "## 5. Install  *(idempotent — skips entirely on the second pass)*\n"
     "\n"
-    "Five seconds here beats discovering a broken import inside a subprocess after the\n"
-    "3B model has loaded. Also proves the subprocess itself can resolve the dotted path."
+    "Short-circuits when `lm_polygraph` is already importable, so after the restart\n"
+    "this costs nothing.\n"
+    "\n"
+    "Note that torch is **not** pinned to an exact version. An earlier revision pinned\n"
+    "`torch==2.6.0`, which forced a multi-GB downgrade of Colab's build and broke\n"
+    "torchvision, the CUDA/driver match, and left the kernel holding a different torch\n"
+    "than its subprocesses. Upstream only requires `>=2.6.0`, which Colab's build\n"
+    "already satisfies."
 )
 code(
-    "import subprocess, sys, os\n"
+    "import importlib.util\n"
     "\n"
-    "from harness.pooled_baseline import PooledBaseline          # in-process\n"
-    "from lm_polygraph.estimators import SpilledEnergy\n"
-    "from lm_polygraph.stat_calculators import EnergyCalculator\n"
-    "print('in-process imports OK:', str(PooledBaseline(score='log_likelihood', pooling='max')))\n"
+    "if importlib.util.find_spec('lm_polygraph') is not None:\n"
+    "    print('lm_polygraph already importable -- skipping install')\n"
+    "else:\n"
+    "    print('installing (expect a few minutes on the first pass)')\n"
+    "    !pip install -q -e .\n"
+    "    !pip install -q -r harness/requirements-repro.txt\n"
     "\n"
-    "# the path that actually matters: a fresh subprocess, as polygraph_eval will be\n"
-    "r = subprocess.run([sys.executable, '-c',\n"
-    "                    'from lm_polygraph.utils.factory_estimator import FactoryEstimator;'\n"
-    "                    'e=FactoryEstimator()(\"harness.pooled_baseline\",'\n"
-    "                    '{\"score\":\"log_likelihood\",\"pooling\":\"max\"});print(\"subprocess OK:\",e)'],\n"
-    "                   capture_output=True, text=True, env=dict(os.environ))\n"
-    "print(r.stdout.strip() or r.stderr.strip())\n"
-    "assert r.returncode == 0, 'subprocess cannot import harness.* -- fix PYTHONPATH before running anything'"
+    "!which polygraph_eval || echo 'NOTE: not on PATH; run_baselines.py prints a fallback'"
 )
 
 # 6 --------------------------------------------------------------------------
 md(
-    "## 6. Model provenance\n"
+    "## 6. Restart the kernel — READ THIS\n"
+    "\n"
+    "Restarts **only if the in-process state is actually stale**, so it cannot loop:\n"
+    "on the second pass everything imports and this cell just prints OK and moves on.\n"
+    "\n"
+    "It restarts when either\n"
+    "\n"
+    "* `lm_polygraph` is not importable in-process (the `.pth` was written after this\n"
+    "  kernel started), or\n"
+    "* the imported `torch.__version__` differs from the version pip has on disk\n"
+    "  (a stale module object).\n"
+    "\n"
+    "### When it restarts, Colab will say the session crashed. That is expected.\n"
+    "### Just run `Runtime → Run all` again. Cells 1–5 will no-op."
+)
+code(
+    "import importlib.util, importlib.metadata as md_, sys\n"
+    "\n"
+    "reasons = []\n"
+    "if importlib.util.find_spec('lm_polygraph') is None:\n"
+    "    reasons.append('lm_polygraph not importable in-process '\n"
+    "                   '(editable-install .pth is only read at interpreter startup)')\n"
+    "if 'torch' in sys.modules:\n"
+    "    import torch\n"
+    "    try:\n"
+    "        on_disk = md_.version('torch')\n"
+    "        if torch.__version__.split('+')[0] != on_disk.split('+')[0]:\n"
+    "            reasons.append(f'stale torch: in-process {torch.__version__} '\n"
+    "                           f'vs installed {on_disk}')\n"
+    "    except Exception as e:\n"
+    "        print('could not compare torch versions:', e)\n"
+    "\n"
+    "if reasons:\n"
+    "    print('=' * 68)\n"
+    "    print('RESTARTING THE KERNEL because:')\n"
+    "    for r in reasons:\n"
+    "        print('  -', r)\n"
+    "    print()\n"
+    "    print('  >>> Colab will report the session crashed. THAT IS EXPECTED. <<<')\n"
+    "    print('  >>> Then choose  Runtime -> Run all  again.               <<<')\n"
+    "    print('  >>> Cells 1-5 are idempotent and will no-op.              <<<')\n"
+    "    print('=' * 68)\n"
+    "    import IPython\n"
+    "    IPython.Application.instance().kernel.do_shutdown(True)\n"
+    "else:\n"
+    "    print('in-process state is consistent with what is installed -- no restart needed')"
+)
+
+# 7 --------------------------------------------------------------------------
+md(
+    "## 7. Post-restart environment assertions\n"
+    "\n"
+    "torch may have changed version during the install, so the CUDA binding is\n"
+    "re-confirmed here rather than inherited from cell 1. Fails loudly if the\n"
+    "in-process torch is stale, CUDA is unavailable, or the device is not a T4."
+)
+code(
+    "import importlib.metadata as md_\n"
+    "import torch\n"
+    "\n"
+    "on_disk = md_.version('torch')\n"
+    "print('torch in-process :', torch.__version__)\n"
+    "print('torch on disk    :', on_disk)\n"
+    "assert torch.__version__.split('+')[0] == on_disk.split('+')[0], (\n"
+    "    'STALE TORCH: the kernel holds a different torch than is installed. '\n"
+    "    'Re-run cell 6 to restart.')\n"
+    "\n"
+    "from packaging.version import Version\n"
+    "assert Version(torch.__version__.split('+')[0]) >= Version('2.6.0'), (\n"
+    "    f'torch {torch.__version__} is below lm-polygraph\\'s required >=2.6.0')\n"
+    "\n"
+    "assert torch.cuda.is_available(), 'CUDA not available after restart'\n"
+    "dev = torch.cuda.get_device_name(0)\n"
+    "free, total = torch.cuda.mem_get_info()\n"
+    "print('device           :', dev)\n"
+    "print(f'VRAM             : {free/1e9:.2f} GB free / {total/1e9:.2f} GB')\n"
+    "if 'T4' not in dev:\n"
+    "    print(f'WARNING: expected a T4, got {dev!r}. Results stay valid; timings differ.')\n"
+    "assert total / 1e9 > 14, f'unexpectedly small GPU ({total/1e9:.1f} GB)'\n"
+    "print('\\nenvironment OK')"
+)
+
+# 8 --------------------------------------------------------------------------
+md(
+    "## 8. Fail-fast import check  *(now testing the real post-install state)*\n"
+    "\n"
+    "Five seconds here beats discovering a broken import inside a subprocess after the\n"
+    "3B model has loaded. Checks both in-process and in a **fresh subprocess** — the\n"
+    "path `polygraph_eval` actually takes, and the one that matters for the ladder's\n"
+    "dotted-path estimators."
+)
+code(
+    "import subprocess, sys, os\n"
+    "\n"
+    "from lm_polygraph.estimators import SpilledEnergy\n"
+    "from lm_polygraph.stat_calculators import EnergyCalculator\n"
+    "from harness.pooled_baseline import PooledBaseline\n"
+    "print('in-process OK:', str(SpilledEnergy(variant='spilled', pooling='max')),\n"
+    "      '|', str(PooledBaseline(score='log_likelihood', pooling='max')))\n"
+    "\n"
+    "r = subprocess.run([sys.executable, '-c',\n"
+    "                    'from lm_polygraph.utils.factory_estimator import FactoryEstimator;'\n"
+    "                    'f=FactoryEstimator();'\n"
+    "                    'print(\"subprocess OK:\", f(\"harness.pooled_baseline\",'\n"
+    "                    '{\"score\":\"log_likelihood\",\"pooling\":\"max\"}),'\n"
+    "                    'f(\"SpilledEnergy\",{\"variant\":\"spilled\",\"pooling\":\"max\"}))'],\n"
+    "                   capture_output=True, text=True, env=dict(os.environ))\n"
+    "print(r.stdout.strip() or r.stderr.strip()[-2000:])\n"
+    "assert r.returncode == 0, ('subprocess cannot import -- check PYTHONPATH (cell 4) '\n"
+    "                          'before running anything expensive')"
+)
+
+# 9 --------------------------------------------------------------------------
+md(
+    "## 9. Model provenance\n"
     "\n"
     "Printed before anything loads the model. `--expect` makes a silent model swap a\n"
     "hard failure rather than a footnote. Confirm `model.path`, `dtype` and `device`\n"
@@ -152,13 +283,13 @@ md(
 )
 code(f"!python harness/provenance.py --config {CFG_BASE} --expect {MODEL}")
 
-# 7 --------------------------------------------------------------------------
-md("## 7. Unit tests (CPU, seconds)\n\nCheap proof the install is sane before any long run.")
+# 10 --------------------------------------------------------------------------
+md("## 10. Unit tests (CPU, seconds)\n\nCheap proof the install is sane before any long run.")
 code("!python -m pytest test/test_spilled_energy.py -q")
 
-# 8 --------------------------------------------------------------------------
+# 11 --------------------------------------------------------------------------
 md(
-    "## 8. Dev run, n=150 — the gates fire here\n"
+    "## 11. Dev run, n=150 — the gates fire here\n"
     "\n"
     "This one short run does four jobs:\n"
     "\n"
@@ -167,8 +298,8 @@ md(
     "   prompt format.\n"
     "2. **Sign check** — a wrong sign shows up as a large *negative* normalized PRR\n"
     "   (~-0.7), which reads as a broken method rather than an inverted score.\n"
-    "3. **Answer-span validation** (cell 9).\n"
-    "4. **Runtime measurement** (cell 10).\n"
+    "3. **Answer-span validation** (cell 12).\n"
+    "4. **Runtime measurement** (cell 13).\n"
     "\n"
     "If the accuracy gate fails, **stop and fix the prompt** — do not widen the band."
 )
@@ -182,9 +313,9 @@ code(
     "!{cmd}"
 )
 
-# 9 --------------------------------------------------------------------------
+# 12 --------------------------------------------------------------------------
 md(
-    "## 9. Validate the answer-span assumption\n"
+    "## 12. Validate the answer-span assumption\n"
     "\n"
     "The ablation ladder defines the answer window as the whole generation. That is\n"
     "only defensible if the generation really is a short answer — measured, not\n"
@@ -201,9 +332,9 @@ code(
     "!{cmd}"
 )
 
-# 10 -------------------------------------------------------------------------
+# 13 --------------------------------------------------------------------------
 md(
-    "## 10. How long will the real runs take?\n"
+    "## 13. How long will the real runs take?\n"
     "\n"
     "Projected from the measured n=150 pass, **before** committing to the long runs.\n"
     "Linear in n, and it double-counts fixed startup, so it slightly overestimates."
@@ -217,9 +348,9 @@ code(
     "print('so budget roughly the same again for run B.')"
 )
 
-# 11 -------------------------------------------------------------------------
+# 14 --------------------------------------------------------------------------
 md(
-    "## 11. Run A — primary baseline table, n=1000\n"
+    "## 14. Run A — primary baseline table, n=1000\n"
     "\n"
     "The mechanically derived `single_pass_cheap` + `single_pass_plus_aux_model` tiers\n"
     "**and** all Spilled Energy variants, in one `UEManager` — so generations and\n"
@@ -238,9 +369,9 @@ code(
     "!{cmd}"
 )
 
-# 12 -------------------------------------------------------------------------
+# 15 --------------------------------------------------------------------------
 md(
-    "## 12. Run B — ablation ladder, n=1000\n"
+    "## 15. Run B — ablation ladder, n=1000\n"
     "\n"
     "Same window, same three poolings on every rung, so adjacent rungs differ by\n"
     "exactly one ingredient: pooled log-likelihood → E^l → E^m → ΔE → ΔE_s.\n"
@@ -257,9 +388,9 @@ code(
     "!{cmd}"
 )
 
-# 13 -------------------------------------------------------------------------
+# 16 --------------------------------------------------------------------------
 md(
-    "## 13. Are the two tables comparable? — hard gate\n"
+    "## 16. Are the two tables comparable? — hard gate\n"
     "\n"
     "Greedy decoding at a fixed seed *should* make the two runs byte-identical, but\n"
     "they resolve different stat calculators, and fp16 reductions are not associative.\n"
@@ -278,9 +409,9 @@ code(
     "!{cmd}"
 )
 
-# 14 -------------------------------------------------------------------------
+# 17 --------------------------------------------------------------------------
 md(
-    "## 14. The reported tables\n"
+    "## 17. The reported tables\n"
     "\n"
     "Primary metric is **normalized PRR@0.5** with bootstrap CIs. Everything on Drive,\n"
     "so tables can be rebuilt offline on CPU with\n"
