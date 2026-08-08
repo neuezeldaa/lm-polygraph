@@ -182,3 +182,16 @@ cython_debug/
 
 # Spilled Energy experiment outputs (never committed)
 workdir/
+
+# --- Spilled Energy experiment hygiene -------------------------------------
+# hydra's default run dir, used when cache_path is not overridden
+outputs/
+# in case hf_cache/cache_path is ever set to a repo-relative path
+hf_cache/
+.ipynb_checkpoints/
+
+# ...but DO track the derived audit artifacts. The tier table is the evidence
+# that the baseline set was derived mechanically rather than hand-picked, and
+# upstream's blanket `*.csv` rule at the top of this file was silently
+# excluding it from every commit.
+!harness/*.csv
