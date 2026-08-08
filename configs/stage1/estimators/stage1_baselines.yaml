@@ -22,18 +22,18 @@
 - name: RenyiNeg
 - name: FisherRao
 - name: BoostedProbSequence
-- name: RAUQ
-  cfg: {alpha: 0.2, use_entropy: False}
-- name: RAUQ
-  cfg: {alpha: 0.8, use_entropy: True}
-- name: CSL
 
 # --- 2 forward passes (NOT a matched single-pass comparison) ---------------
 - name: PTrue
 - name: MeanPointwiseMutualInformation
 - name: MeanConditionalPointwiseMutualInformation
-- name: AttentionScore
-  cfg: {gen_only: False}
+
+# --- MOVED OUT, not dropped -------------------------------------------------
+# RAUQ x2, CSL and AttentionScore need output_attentions=True, which disables
+# transformers' left-padding NaN guard and re-introduces the fp16 overflow.
+# They run at batch_size=1 with eager (no padding => no fully-masked row) in
+# configs/stage1/eval_triviaqa_attention_bs1.yaml, reported as a secondary
+# table. Tier `requires_bs1_under_fp16` in harness/estimator_tiers.md.
 
 # --- 1 pass + a second neural model (DeBERTa-large-MNLI), no sampling ------
 - name: ClaimConditionedProbability

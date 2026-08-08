@@ -11,4 +11,7 @@ add_bos_token: false
 
 load_model_args:
   device_map: cuda
+  # sdpa, not eager: see load_qwen_fp16.py. Required for correctness under
+  # fp16 + left padding, and NOT FlashAttention-2.
+  attn_implementation: sdpa
 load_tokenizer_args: {}

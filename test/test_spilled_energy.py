@@ -207,6 +207,41 @@ def test_logit_energy_and_the_decomposition_identity():
     assert np.all(log_probs < 0)
 
 
+def test_energy_calculator_rejects_non_finite_logits():
+    """Non-finite logits must abort loudly, not flow into the energies.
+
+    Regression test for the fp16 overflow seen on the T4: raw logits went inf,
+    argmax collapsed to token id 0 ('!' in Qwen's vocab), and the corrupted
+    energies would have propagated silently into PRR. Because SpilledEnergy reads
+    RAW logits, nothing downstream normalises a NaN away.
+    """
+    n = 3
+    tok_logits = torch.tensor([1.0, 2.0, 3.0])
+    lse = torch.tensor([2.0, 3.0, 4.0, 5.0])
+    rows = torch.zeros((n + 1, 8))
+
+    # clean input passes
+    EnergyCalculator._assert_finite(tok_logits, lse, rows, 0)
+
+    for label, bad_tok, bad_lse in [
+        ("inf in sampled-token logit", torch.tensor([1.0, float("inf"), 3.0]), lse),
+        ("nan in sampled-token logit", torch.tensor([1.0, float("nan"), 3.0]), lse),
+        ("inf in log-partition", tok_logits, torch.tensor([2.0, float("inf"), 4.0, 5.0])),
+    ]:
+        with pytest.raises(RuntimeError, match="non-finite"):
+            EnergyCalculator._assert_finite(bad_tok, bad_lse, rows, 7)
+
+    # the message must name the sample and point at the cause
+    try:
+        EnergyCalculator._assert_finite(
+            torch.tensor([float("inf"), 2.0, 3.0]), lse, rows, 42
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        assert "sample 42" in msg
+        assert "fp16" in msg
+
+
 def test_spilled_energy_naming_and_validation():
     """__str__ must disambiguate configurations; bad args must raise."""
     assert str(SpilledEnergy("logit", "max")) == "SpilledEnergy_logit_max"

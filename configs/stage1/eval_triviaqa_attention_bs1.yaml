@@ -9,7 +9,16 @@
 #   HYDRA_CONFIG=$(pwd)/configs/stage1/eval_triviaqa_qwen.yaml polygraph_eval
 # (or via the runner: python stage1_run_baselines.py — see docs/stage1_baselines.md)
 #
-# Model:    Qwen/Qwen2.5-3B-Instruct, fp16, eager attention (T4-safe; recon §2,§7)
+# SECONDARY table: the four attention-based baselines at batch_size=1 with
+# eager attention. Same model / dataset / decoding / seed as the primary config;
+# only batch_size, attn_implementation, output_attentions, n and the estimator
+# list differ. Because the fix removes the batch-size dependence of generation,
+# the generations here must be IDENTICAL to the primary run's for the samples
+# they share -- harness/check_run_consistency.py verifies that by hash.
+#
+# n is 300 rather than 1000: batch_size=1 is roughly 2x slower per sample.
+#
+# Model:    Qwen/Qwen2.5-3B-Instruct, fp16, EAGER attention (see note above)
 # Dataset:  LM-Polygraph/triviaqa (continuation subset), test split
 # Decoding: greedy (do_sample=false), max_new_tokens=20, stop on newline, 5-shot
 # Quality:  AccuracyMetric = normalized exact match (recon §6)
@@ -25,7 +34,7 @@ hydra:
 
 defaults:
   - model: qwen2.5-3b-instruct
-  - estimators: stage1_baselines
+  - estimators: attention_bs1
   - stat_calculators: auto
   - base_processing_triviaqa
   - _self_
@@ -48,7 +57,7 @@ load_from_disk: false
 trust_remote_code: false
 multiref: true             # TriviaQA has multiple gold answers -> AggregatedMetric(max)
 size: 10000                  # cap rows loaded before subsampling
-subsample_eval_dataset: 1000 # n>=1000: at n=300 the PRR spread (~+-0.05) cannot
+subsample_eval_dataset: 300 # n>=1000: at n=300 the PRR spread (~+-0.05) cannot
                              # support a baseline-vs-method claim. Override with
                              # --samples for quick debugging only, never for
                              # reported numbers.
@@ -72,15 +81,20 @@ save_stats:
   - greedy_tokens
   - greedy_log_likelihoods
 
-# MUST stay false. transformers only applies its left-padding NaN guard
-# (AttentionMaskConverter._unmask_unattended) when the attention implementation
-# is sdpa AND output_attentions is False. Setting this true re-enables the fp16
-# overflow that collapsed 108/150 generations to token 0. The attention-based
-# baselines that need it run separately at batch_size=1 with eager, in
-# eval_triviaqa_attention_bs1.yaml.
-output_attentions: false
+# TRUE here, unlike the primary config: these estimators consume attention maps.
+# That disables transformers' left-padding NaN guard, which is safe ONLY because
+# batch_size is 1 below -- with a single sequence per batch there is no padding,
+# so no attention row is ever fully masked and the fp16 overflow cannot occur.
+# Do NOT raise batch_size in this config.
+output_attentions: true
+
+# Override the model group's sdpa: these estimators need eager attention maps.
+# Safe ONLY at batch_size=1 (no padding => no fully-masked row => no fp16 overflow).
+model:
+  load_model_args:
+    attn_implementation: eager
 
 ignore_exceptions: false
-batch_size: 4
+batch_size: 1
 seed:
   - 1

@@ -58,6 +58,41 @@ class EnergyCalculator(StatCalculator):
         super().__init__()
         self.batch_chunk_size = batch_chunk_size
 
+    @staticmethod
+    def _assert_finite(tok_logits, lse, rows, sample_idx: int) -> None:
+        """Fail loudly on non-finite logits instead of poisoning the scores.
+
+        Spilled Energy reads RAW logits, so an inf or NaN does not get normalised
+        away the way it would in a log-softmax: it propagates straight into the
+        energies, through pooling, and into PRR as a plausible-looking number.
+        A silent NaN here is far worse than a crash.
+
+        The usual cause is fp16 range overflow. Models trained in bf16 (Qwen2.5
+        among them) can produce activations outside fp16's much narrower dynamic
+        range; on Turing GPUs such as the T4 there is no hardware bf16, so fp16
+        is the only half-precision option. The visible symptom downstream is
+        argmax collapsing to token id 0.
+        """
+        bad_tok = ~torch.isfinite(tok_logits)
+        bad_lse = ~torch.isfinite(lse)
+        if not (bad_tok.any() or bad_lse.any()):
+            return
+
+        steps = torch.nonzero(bad_tok | bad_lse[: len(bad_tok)]).flatten().tolist()
+        n_bad_rows = int((~torch.isfinite(rows)).any(dim=-1).sum())
+        raise RuntimeError(
+            f"EnergyCalculator: non-finite logits in sample {sample_idx}.\n"
+            f"  non-finite sampled-token logits : {int(bad_tok.sum())}/{len(bad_tok)}\n"
+            f"  non-finite log-partitions       : {int(bad_lse.sum())}/{len(bad_lse)}\n"
+            f"  decoding steps with any non-finite vocab entry: {n_bad_rows}\n"
+            f"  first affected steps            : {steps[:10]}\n"
+            f"  dtype                           : {rows.dtype}\n"
+            "This is almost always fp16 range overflow (Qwen2.5 was trained in "
+            "bf16; a T4 has no hardware bf16). The energies would be garbage, so "
+            "the run is aborted rather than producing meaningless PRR. Diagnose "
+            "with harness/diagnose_fp16.py."
+        )
+
     def _prompt_ids(self, model: WhiteboxModel, texts: List[str]) -> List[List[int]]:
         """Tokenize each prompt individually (no padding) to get true lengths."""
         tokenizer = model.tokenizer
@@ -154,6 +189,8 @@ class EnergyCalculator(StatCalculator):
                         list(greedy_tokens[i]), dtype=torch.long, device=rows.device
                     )
                     tok_logits = rows[:n_gen].gather(1, tok.unsqueeze(1)).squeeze(1)
+
+                    self._assert_finite(tok_logits, lse, rows, i)
 
                     token_logits_out.append(
                         tok_logits.cpu().numpy().astype(np.float32, copy=False)
