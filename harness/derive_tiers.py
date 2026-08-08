@@ -53,23 +53,25 @@ TIER_PRIORITY = [
     "needs_train_data",
     "needs_external_corpus",
     "needs_sampling",
-    "needs_auxiliary_model",
+    "single_pass_plus_aux_model",
 ]
 
-# Attention-memory model, sized for the frozen Stage 1 setting.
-# Qwen2.5-3B-Instruct: 36 layers x 16 attention heads. A 5-shot TriviaQA prompt
-# runs ~600 tokens; generation is 20 tokens.
+# Attention-memory model. Qwen2.5-3B-Instruct is 36 layers x 16 heads.
+# ATTN_SEQ_LEN is MEASURED, not assumed: harness/measure_prompt_len.py tokenizes
+# real 5-shot TriviaQA prompts with the model's own tokenizer and writes
+# harness/prompt_length.json, which this script reads. Memory scales with L^2, so
+# this is the value the whole feasibility argument hinges on.
 ATTN_LAYERS = 36
 ATTN_HEADS = 16
-ATTN_SEQ_LEN = 600
+ATTN_SEQ_LEN = 185  # p99 of the measured distribution; overridden by the json
 ATTN_GEN_LEN = 20
-ATTN_BATCH = 4  # the frozen config's batch_size
+ATTN_BATCH = 4  # the frozen config's batch_size; overridable with --batch-size
 # AttentionForwardPassCalculator does torch.cat(attentions).float().numpy(), i.e.
-# [layers, heads, L, L] in float32 per sample, then pads the batch to the longest
-# sequence and copies again via np.array. Peak is therefore ~batch x per-sample,
-# doubled by the padding copy. 512 MB/sample -> ~4 GB peak at batch 4, on a free
-# Colab VM with ~12.7 GB of system RAM. That is the line.
-ATTN_BUDGET_BYTES = 512 * 1024**2
+# [layers, heads, L, L] float32 per sample, then pads the batch to the longest
+# sequence and copies again via np.array -- so peak ~ 2 x batch x per-sample.
+# Budget is expressed per BATCH, because "is this feasible" depends on batch size:
+# a method that fails at batch 4 may be fine at batch 1.
+ATTN_BATCH_BUDGET_BYTES = 4 * 1024**3  # 4 GB of a free Colab VM's ~12.7 GB
 
 EXCLUSION_REASON = {
     "needs_train_data": (
@@ -95,6 +97,12 @@ EXCLUSION_REASON = {
         f"{ATTN_HEADS} heads over a ~{ATTN_SEQ_LEN}-token 5-shot prompt this is "
         "GBs per sample, stored as float32 on CPU. Excluded: unsafe on a T4 at "
         "this prompt length."
+    ),
+    "single_pass_plus_aux_model": (
+        "One generation plus a second neural model (NLI cross-encoder) over that "
+        "generation -- no sampling. INCLUDED in the primary table as its own row, "
+        "flagged: it is materially cheaper than the sampling tier but is not a "
+        "pure single-pass method."
     ),
     "single_pass_cheap": "",
     "instantiation_failed": "Could not be constructed; see error column.",
@@ -242,6 +250,11 @@ def classify(stats, calcs, est_cfg):
     # auxiliary neural model
     if cfg_keys & AUX_MODEL_CFG_KEYS:
         flags.add("needs_auxiliary_model")
+        # Without sampling, a second model is one extra encoder pass over the
+        # generation -- far cheaper than the sampling tier, so it gets its own
+        # tier and stays in the primary table rather than being dropped.
+        if "needs_sampling" not in flags:
+            flags.add("single_pass_plus_aux_model")
 
     # attention tensors: flag, and size them -- this is a real T4 constraint, not
     # a formality. AttentionForwardPassCalculator stores
@@ -251,9 +264,11 @@ def classify(stats, calcs, est_cfg):
     for s in attn_stats:
         span = ATTN_GEN_LEN if s in GEN_ONLY_ATTENTION_STATS else ATTN_SEQ_LEN
         attn_bytes = max(attn_bytes, ATTN_LAYERS * ATTN_HEADS * span * span * 4)
+    # peak is per batch, and the padding step copies it once more
+    batch_peak = attn_bytes * ATTN_BATCH * 2
     if attn_stats:
         flags.add("needs_attention")
-        if attn_bytes > ATTN_BUDGET_BYTES:
+        if batch_peak > ATTN_BATCH_BUDGET_BYTES:
             flags.add("unsafe_attention_memory")
 
     tier = "single_pass_cheap"
@@ -263,14 +278,72 @@ def classify(stats, calcs, est_cfg):
             break
     if tier == "single_pass_cheap" and "unsafe_attention_memory" in flags:
         tier = "unsafe_attention_memory"
-    return tier, flags, attn_bytes
+    return tier, flags, attn_bytes, batch_peak
+
+
+def count_model_passes(calcs):
+    """How many times each resolved calculator invokes the model.
+
+    Derived by inspecting each calculator class's own source for generate/forward
+    call sites, so it stays mechanical rather than a curated list. Used to qualify
+    the 'matched single-pass budget' claim: PTrue and the PMI family each add a
+    second pass, so they are ~2x the cost of MSP/Perplexity.
+    """
+    import inspect
+
+    total, detail = 0, {}
+    for name, c in sorted(calcs.items()):
+        obj = getattr(c, "obj", None)
+        if obj is None:
+            detail[name] = "?"
+            continue
+        # Walk the MRO: several calculators (the PromptCalculator family) declare
+        # only meta_info/__init__ on the subclass and inherit __call__ -- and the
+        # model invocation lives in that inherited __call__.
+        src = ""
+        for klass in inspect.getmro(obj):
+            if klass.__name__ in ("object", "StatCalculator", "ABC"):
+                continue
+            try:
+                src += inspect.getsource(klass)
+            except (OSError, TypeError):
+                continue
+        if not src:
+            detail[name] = "?"
+            continue
+        n = len(re.findall(r"model\.generate\(", src)) + len(
+            re.findall(r"model\.model\(|model\(\*\*|model\.__call__\(", src)
+        )
+        n = 1 if n > 1 else n  # multiple call sites are branches, not repeats
+        detail[name] = n
+        total += n
+    return total, detail
 
 
 def main():
+    global ATTN_BATCH, ATTN_SEQ_LEN
     ap = argparse.ArgumentParser()
     ap.add_argument("--estimators", type=Path, default=DEFAULT_ESTIMATORS)
     ap.add_argument("--out-dir", type=Path, default=REPO / "harness")
+    ap.add_argument("--batch-size", type=int, default=4,
+                    help="Batch size the feasibility verdict is evaluated at.")
+    ap.add_argument("--seq-len", type=int, default=None,
+                    help="Prompt length; defaults to the MEASURED p99 in prompt_length.json.")
+    ap.add_argument("--tag", default="", help="Suffix for the output filenames.")
     args = ap.parse_args()
+
+    ATTN_BATCH = args.batch_size
+    measured = REPO / "harness" / "prompt_length.json"
+    if args.seq_len is not None:
+        ATTN_SEQ_LEN = args.seq_len
+        src = "--seq-len"
+    elif measured.exists():
+        import json as _json
+        ATTN_SEQ_LEN = int(_json.loads(measured.read_text())["p99"])
+        src = f"measured p99 ({measured.name})"
+    else:
+        src = "module default (UNMEASURED)"
+    print(f"[tiers] batch_size={ATTN_BATCH}  prompt_len={ATTN_SEQ_LEN}  <- {src}")
 
     if not args.estimators.exists():
         sys.exit(f"estimator list not found: {args.estimators}")
@@ -293,7 +366,7 @@ def main():
         # corpus in __init__ (Focus pulls RedPajama + a spaCy model), so
         # instantiating everything would trigger the very cost we are here to
         # rule out. If the cfg already marks it external, skip construction.
-        _, precheck_flags, _ = classify(set(), {}, cfg)
+        _, precheck_flags, _, _ = classify(set(), {}, cfg)
         if "needs_external_corpus" in precheck_flags:
             deps, label, level = [], name, "?"
             err = "skipped: cfg declares an external corpus; not instantiated"
@@ -311,7 +384,8 @@ def main():
                 print(f"[tiers] WARN could not instantiate {name} ({cfg_str}): {err}")
 
         stats, calcs, unresolved = resolve_transitive(deps, index)
-        tier, flags, attn_bytes = classify(stats, calcs, cfg)
+        tier, flags, attn_bytes, batch_peak = classify(stats, calcs, cfg)
+        n_passes, _pass_detail = count_model_passes(calcs)
         # An instantiation failure must not erase a valid cfg-based verdict:
         # only fall back to the sentinel tier when nothing else classified it.
         if err and tier == "single_pass_cheap" and not flags:
@@ -325,7 +399,9 @@ def main():
             "direct_deps": ",".join(sorted(deps)) or "-",
             "resolved_calculators": ",".join(sorted(calcs)) or "-",
             "n_resolved_stats": len(stats),
-            "attn_peak_mb_per_sample": round(attn_bytes / 1024**2, 1) if attn_bytes else 0,
+            "attn_mb_per_sample": round(attn_bytes / 1024**2, 1) if attn_bytes else 0,
+            "attn_peak_mb_at_batch": round(batch_peak / 1024**2, 1) if batch_peak else 0,
+            "model_passes": n_passes,
             "unresolved_stats": ",".join(sorted(unresolved)) or "-",
             "flags": ",".join(sorted(flags)) or "-",
             "tier": tier,
@@ -334,7 +410,7 @@ def main():
         })
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = args.out_dir / "estimator_tiers.csv"
+    csv_path = args.out_dir / f"estimator_tiers{args.tag}.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader()
@@ -349,6 +425,7 @@ def main():
           "transitive dependency set*, not by a list of names.", ""]
 
     order = TIER_PRIORITY + ["unsafe_attention_memory", "single_pass_cheap", "instantiation_failed"]
+    PRIMARY = {"single_pass_cheap", "single_pass_plus_aux_model"}
     counts = {t: sum(1 for r in rows if r["tier"] == t) for t in order}
     md += ["| Tier | Count | Meaning |", "|---|---:|---|"]
     for t in order:
@@ -368,7 +445,7 @@ def main():
             )
         md.append("")
 
-    md_path = args.out_dir / "estimator_tiers.md"
+    md_path = args.out_dir / f"estimator_tiers{args.tag}.md"
     md_path.write_text("\n".join(md), encoding="utf-8")
     print(f"[tiers] wrote {md_path}")
 
@@ -376,11 +453,11 @@ def main():
     for t in order:
         if counts.get(t):
             print(f"  {t:24s} {counts[t]}")
-    print("\n=== single_pass_cheap (the primary baseline set) ===")
+    print("\n=== PRIMARY BASELINE SET (single_pass_cheap + single_pass_plus_aux_model) ===")
     for r in sorted(rows, key=lambda r: r["estimator"]):
-        if r["tier"] == "single_pass_cheap":
+        if r["tier"] in PRIMARY:
             extra = f"   [{r['flags']}]" if r["flags"] != "-" else ""
-            print(f"  {r['estimator']:45s}{extra}")
+            print(f"  {r['estimator']:42s} passes={r['model_passes']}{extra}")
 
 
 if __name__ == "__main__":

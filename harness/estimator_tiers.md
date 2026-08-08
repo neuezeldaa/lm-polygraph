@@ -7,9 +7,8 @@ Population: all 50 rows of upstream `examples/configs/estimators/default_estimat
 | `needs_train_data` | 5 | Fits statistics on a train/background split. Excluded: the assignment forbids supervised training, and this is fitting on held-out train/background data in all but name. |
 | `needs_external_corpus` | 1 | Downloads a large external corpus or artifact at init. Excluded: not feasible on a free T4 session and not required by any constraint. |
 | `needs_sampling` | 29 | Requires multiple sampled generations per input. Excluded from the primary table: cost is a multiple of the single-pass budget, so it is not a matched-compute comparison. Reported separately at n=300. |
-| `needs_auxiliary_model` | 1 | Requires a second neural model (NLI / cross-encoder) resident on the GPU alongside the 3B LM. Excluded: VRAM pressure on a 16GB T4. |
-| `unsafe_attention_memory` | 2 | Materialises full-sequence attention tensors. At 36 layers x 16 heads over a ~600-token 5-shot prompt this is GBs per sample, stored as float32 on CPU. Excluded: unsafe on a T4 at this prompt length. |
-| `single_pass_cheap` | 12 | Primary baseline set. |
+| `single_pass_plus_aux_model` | 1 | One generation plus a second neural model (NLI cross-encoder) over that generation -- no sampling. INCLUDED in the primary table as its own row, flagged: it is materially cheaper than the sampling tier but is not a pure single-pass method. |
+| `single_pass_cheap` | 14 | Primary baseline set. |
 
 ## needs_train_data  (5)
 
@@ -61,24 +60,19 @@ Population: all 50 rows of upstream `examples/configs/estimators/default_estimat
 | `SentenceSAR` | - | CrossEncoderSimilarityMatrixCalculator,GreedyProbsCalculator,InitialStateCalculator,SamplingGenerationCalculator | needs_auxiliary_model,needs_sampling |
 | `TokenSAR` | - | CrossEncoderSimilarityMatrixCalculator,GreedyProbsCalculator,InitialStateCalculator,SamplingGenerationCalculator | needs_auxiliary_model,needs_sampling |
 
-## needs_auxiliary_model  (1)
+## single_pass_plus_aux_model  (1)
 
 | Estimator | cfg | Resolved calculators | Flags |
 |---|---|---|---|
-| `CCP` | - | GreedyAlternativesNLICalculator,GreedyProbsCalculator | needs_auxiliary_model |
+| `CCP` | - | GreedyAlternativesNLICalculator,GreedyProbsCalculator | needs_auxiliary_model,single_pass_plus_aux_model |
 
-## unsafe_attention_memory  (2)
-
-| Estimator | cfg | Resolved calculators | Flags |
-|---|---|---|---|
-| `AttentionScore (layer=None)` | gen_only=False | AttentionForwardPassCalculator,GreedyProbsCalculator | needs_attention,unsafe_attention_memory |
-| `CSL` | - | AttentionElicitingPromptCalculator,GreedyProbsCalculator | needs_attention,unsafe_attention_memory |
-
-## single_pass_cheap  (12)
+## single_pass_cheap  (14)
 
 | Estimator | cfg | Resolved calculators | Flags |
 |---|---|---|---|
+| `AttentionScore (layer=None)` | gen_only=False | AttentionForwardPassCalculator,GreedyProbsCalculator | needs_attention |
 | `BoostedProbSequence` | - | GreedyProbsCalculator | - |
+| `CSL` | - | AttentionElicitingPromptCalculator,GreedyProbsCalculator | needs_attention |
 | `FisherRao` | - | GreedyProbsCalculator | - |
 | `MaximumSequenceProbability` | - | GreedyProbsCalculator | - |
 | `MeanConditionalPointwiseMutualInformation` | - | EntropyCalculator,GreedyLMProbsCalculator,GreedyProbsCalculator | - |

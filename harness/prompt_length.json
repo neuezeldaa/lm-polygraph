@@ -1,0 +1,15 @@
+{
+  "model": "Qwen/Qwen2.5-3B-Instruct",
+  "dataset": [
+    "LM-Polygraph/triviaqa",
+    "continuation"
+  ],
+  "n_shot": 5,
+  "n_measured": 200,
+  "min": 165,
+  "p50": 173.0,
+  "mean": 173.35,
+  "p95": 182.04999999999998,
+  "p99": 185.0,
+  "max": 185
+}
