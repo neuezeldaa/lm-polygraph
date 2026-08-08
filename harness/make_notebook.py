@@ -22,6 +22,7 @@ BRANCH = "spilled-energy-experiments"
 MODEL = "Qwen/Qwen2.5-3B-Instruct"
 CFG_BASE = "configs/stage1/eval_triviaqa_qwen.yaml"
 CFG_LADDER = "configs/stage1/eval_triviaqa_ladder.yaml"
+CFG_ATTN = "configs/stage1/eval_triviaqa_attention_bs1.yaml"
 
 cells = []
 md = lambda s: cells.append(new_markdown_cell(s))
@@ -411,7 +412,53 @@ code(
 
 # 17 --------------------------------------------------------------------------
 md(
-    "## 17. The reported tables\n"
+    "## 17. Run C — attention baselines, batch_size=1, n=300\n"
+    "\n"
+    "`RAUQ` x2, `CSL` and `AttentionScore` need `output_attentions=True`, which\n"
+    "disables transformers' left-padding NaN guard. At `batch_size=1` there is no\n"
+    "padding at all, so no attention row is ever fully masked and the fp16 overflow\n"
+    "cannot occur — the cost of bs=1 is paid by these four methods rather than by\n"
+    "the whole experiment.\n"
+    "\n"
+    "This config also uses **eager** attention, overriding the model group's sdpa.\n"
+    "n=300 because bs=1 is roughly 2x slower per sample."
+)
+code(
+    "cmd = ('python harness/run_baselines.py'\n"
+    f"       ' --config {CFG_ATTN}'\n"
+    "       f\" --save-dir '{DRIVE}/C_attention_bs1_n300'\"\n"
+    "       ' --n-boot 1000'\n"
+    f"       ' --expect-model {MODEL}')\n"
+    "print(cmd)\n"
+    "!{cmd}"
+)
+
+# 18 --------------------------------------------------------------------------
+md(
+    "## 18. Does batch size change the generations? — hard gate\n"
+    "\n"
+    "With the fix in place `batch_size` must not affect generation at all, so Run C\n"
+    "(bs=1, n=300) and Run A (bs=4, n=1000) must agree on their shared 300 samples.\n"
+    "This is the property `test_batched_generation_matches_individual` asserts on a\n"
+    "stub; here it is verified by hash on the real data.\n"
+    "\n"
+    "`--allow-prefix` is sound because `Dataset.subsample` uses `np.random.choice`\n"
+    "under a fixed seed, which is prefix-stable — the n=300 subsample is exactly the\n"
+    "first 300 of the n=1000 one (asserted by `test_subsample_is_prefix_stable`).\n"
+    "\n"
+    "If this fails, the bs=1 table must NOT be placed beside the primary table."
+)
+code(
+    "cmd = ('python harness/check_run_consistency.py'\n"
+    "       f\" --a '{DRIVE}/A_baselines_n1000'\"\n"
+    "       f\" --b '{DRIVE}/C_attention_bs1_n300'\"\n"
+    "       ' --label-a bs4_primary --label-b bs1_attention --allow-prefix')\n"
+    "!{cmd}"
+)
+
+# 19 --------------------------------------------------------------------------
+md(
+    "## 19. The reported tables\n"
     "\n"
     "Primary metric is **normalized PRR@0.5** with bootstrap CIs. Everything on Drive,\n"
     "so tables can be rebuilt offline on CPU with\n"
@@ -420,7 +467,9 @@ md(
 code(
     "from IPython.display import Markdown, display\n"
     "for tag, label in [('A_baselines_n1000', 'PRIMARY BASELINE TABLE'),\n"
-    "                   ('B_ladder_n1000',   'ABLATION LADDER')]:\n"
+    "                   ('B_ladder_n1000',   'ABLATION LADDER'),\n"
+    "                   ('C_attention_bs1_n300',\n"
+    "                    'SECONDARY: attention baselines (bs=1, n=300)')]:\n"
     "    p = DRIVE_OUT / tag / 'prr_0.5_table.md'\n"
     "    display(Markdown(f'# {label}'))\n"
     "    display(Markdown(p.read_text() if p.exists() else f'_missing: {p}_'))"

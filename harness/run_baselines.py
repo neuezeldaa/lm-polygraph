@@ -227,6 +227,87 @@ def collect(man):
     return rows, estimations, gen_metrics, diag
 
 
+def degeneracy_gate(man, vocab_size=None):
+    """Catch numerically collapsed generations, whatever their cause.
+
+    Two cheap checks, both of which would have flagged the first T4 run
+    immediately instead of it surfacing as an accuracy of 0:
+
+    1. No generation may consist of a single repeated token id. When the logits
+       go non-finite, lm-polygraph's _SanitizeLogitsProcessor rewrites the row to
+       zeros, argmax becomes token 0, and the whole generation is that one token
+       repeated.
+    2. The mean log-likelihood must not sit at -ln(V). A uniform distribution
+       over the vocabulary gives exactly that at every position, which is the
+       fingerprint of a sanitised non-finite row rather than a real prediction.
+
+    This is deliberately cause-agnostic: it tests the SHAPE of the failure, so it
+    still fires if some future numerical problem produces the same collapse by a
+    different route.
+    """
+    stats = _field(man, "stats") or {}
+    tokens = stats.get("greedy_tokens")
+    texts = stats.get("greedy_texts")
+    lls = stats.get("greedy_log_likelihoods")
+
+    print("\n=== degeneracy gate ===")
+    failures = []
+
+    if tokens:
+        repeated = [
+            i for i, tk in enumerate(tokens)
+            if tk is not None and len(tk) >= 3 and len(set(tk)) == 1
+        ]
+        print(f"  single-repeated-token generations : {len(repeated)}/{len(tokens)}"
+              f" = {len(repeated)/len(tokens):.1%}")
+        if repeated:
+            ex = repeated[:5]
+            print(f"    affected sample indices (first 5): {ex}")
+            print(f"    repeated token id                : {tokens[ex[0]][0]}")
+            failures.append(
+                f"{len(repeated)}/{len(tokens)} generations are one token repeated"
+            )
+    else:
+        print("  greedy_tokens not saved; cannot check repetition")
+
+    if lls:
+        import math
+
+        means = np.array([np.mean(x) for x in lls if len(x)], dtype=np.float64)
+        if means.size:
+            print(f"  mean log-likelihood range         : "
+                  f"[{means.min():.4f}, {means.max():.4f}]")
+            if vocab_size:
+                flat = -math.log(vocab_size)
+                pinned = int(np.sum(np.isclose(means, flat, atol=1e-3)))
+                print(f"  pinned at -ln(V) = {flat:.4f}          : "
+                      f"{pinned}/{means.size} = {pinned/means.size:.1%}")
+                if pinned:
+                    failures.append(
+                        f"{pinned}/{means.size} samples have mean log-likelihood "
+                        f"at -ln(V)={flat:.4f}, i.e. a uniform distribution"
+                    )
+            # even without V, an exactly-constant log-likelihood is degenerate
+            const = int(sum(1 for x in lls if len(x) > 2 and np.std(x) == 0))
+            if const:
+                print(f"  constant log-likelihood across steps: {const}/{len(lls)}")
+                failures.append(f"{const} samples have an identical log-likelihood "
+                                "at every decoding step")
+
+    if failures:
+        det = "; ".join(failures)
+        sys.exit(
+            f"\n[degeneracy] FATAL: {det}.\n"
+            "  The logits collapsed to a uniform distribution. Under fp16 the usual\n"
+            "  cause is a fully-masked attention row from left padding overflowing\n"
+            "  to -inf; transformers only guards that when attn_implementation is\n"
+            "  'sdpa' AND output_attentions is False. Check both in the config, or\n"
+            "  drop to batch_size=1 so no padding exists.\n"
+            "  Do not interpret any PRR value from this run."
+        )
+    print("[degeneracy] PASS")
+
+
 def accuracy_gate(gen_metrics, lo, hi):
     """Print the mean of every quality function; hard-fail if out of band."""
     print("\n=== quality function means (accuracy gate) ===")
@@ -396,6 +477,19 @@ def main():
             print(f"  expected one of      : {[PRR_KEY, PRR_RAW_KEY]}")
             sys.exit(1)
 
+        vocab = None
+        if args.config is not None:
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from provenance import resolve
+                from transformers import AutoConfig
+
+                vocab = AutoConfig.from_pretrained(
+                    resolve(args.config)["model_path"]).vocab_size
+            except Exception as e:
+                print(f"[degeneracy] could not resolve vocab_size ({e}); "
+                      "skipping the -ln(V) check")
+        degeneracy_gate(man, vocab)
         accuracy_gate(gen_metrics, args.acc_min, args.acc_max)
 
         n = None

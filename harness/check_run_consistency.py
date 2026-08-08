@@ -82,6 +82,9 @@ def main():
     ap.add_argument("--b", type=Path, required=True, help="Second run directory.")
     ap.add_argument("--label-a", default="run A")
     ap.add_argument("--label-b", default="run B")
+    ap.add_argument("--allow-prefix", action="store_true",
+                    help="Runs may differ in n; compare their shared prefix. Valid "
+                         "because Dataset.subsample is prefix-stable under a fixed seed.")
     args = ap.parse_args()
 
     A, B = load(args.a), load(args.b)
@@ -97,8 +100,29 @@ def main():
     na = len(A["texts"]) if A["texts"] else 0
     nb = len(B["texts"]) if B["texts"] else 0
     print(f"\n  n samples          : {na}  vs  {nb}")
-    if na != nb or na == 0:
-        failures.append(f"sample count differs ({na} vs {nb})")
+    if na == 0 or nb == 0:
+        failures.append("a run has no generations")
+
+    # Runs of different n are still comparable on their overlap: Dataset.subsample
+    # takes np.random.choice(N, size) under a fixed seed, and numpy's without-
+    # replacement choice is prefix-stable, so the smaller run's samples are
+    # exactly the first k of the larger run's. Verified in
+    # test_subsample_is_prefix_stable. This is what lets the batch_size=1
+    # attention run be checked against the batch_size=4 primary run.
+    k = min(na, nb)
+    if na != nb:
+        if not args.allow_prefix:
+            failures.append(
+                f"sample count differs ({na} vs {nb}); pass --allow-prefix to "
+                "compare the shared prefix instead"
+            )
+        else:
+            print(f"  comparing the shared prefix of {k} samples "
+                  f"(runs differ in n by design)")
+    for d in (A, B):
+        for key in ("texts", "tokens", "quality"):
+            if d[key] is not None:
+                d[key] = d[key][:k]
 
     ha, hb = sha(A["texts"]), sha(B["texts"])
     print(f"  sha256 greedy_texts: {ha[:16]}...  vs  {hb[:16]}...")

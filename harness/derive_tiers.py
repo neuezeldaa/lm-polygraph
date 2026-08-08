@@ -92,6 +92,17 @@ EXCLUSION_REASON = {
         "Requires a second neural model (NLI / cross-encoder) resident on the "
         "GPU alongside the 3B LM. Excluded: VRAM pressure on a 16GB T4."
     ),
+    "requires_bs1_under_fp16": (
+        "Consumes attention maps, which forces output_attentions=True. That "
+        "disables transformers' left-padding NaN guard "
+        "(AttentionMaskConverter._unmask_unattended runs only when "
+        "_attn_implementation == 'sdpa' AND output_attentions is False), so under "
+        "fp16 a fully-masked attention row overflows to -inf and softmax returns "
+        "NaN -- observed as 108/150 generations collapsing to token 0. NOT "
+        "excluded: run separately at batch_size=1 with eager attention, where no "
+        "padding exists and therefore no attention row is ever fully masked. "
+        "Reported as a secondary table at n=300."
+    ),
     "unsafe_attention_memory": (
         f"Materialises full-sequence attention tensors. At {ATTN_LAYERS} layers x "
         f"{ATTN_HEADS} heads over a ~{ATTN_SEQ_LEN}-token 5-shot prompt this is "
@@ -278,6 +289,10 @@ def classify(stats, calcs, est_cfg):
             break
     if tier == "single_pass_cheap" and "unsafe_attention_memory" in flags:
         tier = "unsafe_attention_memory"
+    # Attention consumers force output_attentions=True, which disables the
+    # left-padding NaN guard; they are runnable, but only at batch_size=1.
+    if tier == "single_pass_cheap" and "needs_attention" in flags:
+        tier = "requires_bs1_under_fp16"
     return tier, flags, attn_bytes, batch_peak
 
 
@@ -424,7 +439,8 @@ def main():
           "distinct row. Tier is assigned by predicates over each estimator's *resolved "
           "transitive dependency set*, not by a list of names.", ""]
 
-    order = TIER_PRIORITY + ["unsafe_attention_memory", "single_pass_cheap", "instantiation_failed"]
+    order = TIER_PRIORITY + ["unsafe_attention_memory", "requires_bs1_under_fp16",
+                             "single_pass_cheap", "instantiation_failed"]
     PRIMARY = {"single_pass_cheap", "single_pass_plus_aux_model"}
     counts = {t: sum(1 for r in rows if r["tier"] == t) for t in order}
     md += ["| Tier | Count | Meaning |", "|---|---:|---|"]

@@ -190,3 +190,23 @@ def test_generation_is_not_a_degenerate_constant(model):
         # a constant value across all steps is the same symptom, vocab-size aside
         if len(arr) > 2:
             assert arr.std() > 0, f"sample {i}: identical log-likelihood at every step"
+
+
+def test_subsample_is_prefix_stable():
+    """A smaller subsample must be the prefix of a larger one under the same seed.
+
+    This is what makes the batch_size=1 attention run (n=300) comparable to the
+    batch_size=4 primary run (n=1000): they see the same first 300 samples, so
+    harness/check_run_consistency.py --allow-prefix can hash-compare them.
+    Dataset.subsample uses np.random.choice(N, size, replace=False) after
+    np.random.seed(seed); this pins the prefix property that relies on.
+    """
+    for N, seed in [(10000, 1), (2000, 1), (5000, 7)]:
+        np.random.seed(seed)
+        small = np.random.choice(N, 300, replace=False)
+        np.random.seed(seed)
+        large = np.random.choice(N, 1000, replace=False)
+        assert np.array_equal(small, large[:300]), (
+            f"subsample is not prefix-stable for N={N}, seed={seed}; the two runs "
+            "would not share samples and could not be compared"
+        )

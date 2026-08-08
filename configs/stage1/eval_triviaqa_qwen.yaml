@@ -72,6 +72,14 @@ save_stats:
   - greedy_tokens
   - greedy_log_likelihoods
 
+# MUST stay false. transformers only applies its left-padding NaN guard
+# (AttentionMaskConverter._unmask_unattended) when the attention implementation
+# is sdpa AND output_attentions is False. Setting this true re-enables the fp16
+# overflow that collapsed 108/150 generations to token 0. The attention-based
+# baselines that need it run separately at batch_size=1 with eager, in
+# eval_triviaqa_attention_bs1.yaml.
+output_attentions: false
+
 ignore_exceptions: false
 batch_size: 4
 seed:

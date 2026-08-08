@@ -15,13 +15,37 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-def load_model(model_path: str, device_map: str):
+def load_model(model_path: str, device_map: str, attn_implementation: str = "sdpa"):
+    """
+    attn_implementation defaults to "sdpa", NOT "eager".
+
+    This is a correctness requirement under fp16, not a performance preference.
+    Qwen2 eager attention computes ``attn_weights + causal_mask`` with
+    ``causal_mask = finfo(dtype).min``. Left padding leaves the leading query
+    positions attending to nothing, so their whole row is masked; in fp16
+    finfo.min is -65504 and adding any ordinary score overflows the row to -inf,
+    making softmax NaN. Only the longest sequence in a batch escapes, which is
+    why 108/150 samples collapsed to token 0 ('!') on the first T4 run.
+
+    transformers guards this via AttentionMaskConverter._unmask_unattended, but
+    only when _attn_implementation == "sdpa" AND output_attentions is False --
+    so BOTH must hold. See configs/stage1/eval_triviaqa_qwen.yaml, which sets
+    output_attentions: false for the same reason.
+
+    sdpa is PyTorch's native scaled_dot_product_attention, not FlashAttention-2,
+    so it is inside the T4 constraint.
+
+    The attention-based baselines (RAUQ, AttentionScore, CSL) need
+    output_attentions=True, which disables the guard again. They are run
+    separately at batch_size=1 with eager, where no padding exists and therefore
+    no fully-masked row -- see configs/stage1/eval_triviaqa_attention_bs1.yaml.
+    """
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         trust_remote_code=True,
         device_map=device_map,
         torch_dtype=torch.float16,   # fp16, per T4 constraint
-        attn_implementation="eager",  # no FlashAttention-2
+        attn_implementation=attn_implementation,
     )
     model.eval()
     return model

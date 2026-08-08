@@ -8,7 +8,8 @@ Population: all 50 rows of upstream `examples/configs/estimators/default_estimat
 | `needs_external_corpus` | 1 | Downloads a large external corpus or artifact at init. Excluded: not feasible on a free T4 session and not required by any constraint. |
 | `needs_sampling` | 29 | Requires multiple sampled generations per input. Excluded from the primary table: cost is a multiple of the single-pass budget, so it is not a matched-compute comparison. Reported separately at n=300. |
 | `single_pass_plus_aux_model` | 1 | One generation plus a second neural model (NLI cross-encoder) over that generation -- no sampling. INCLUDED in the primary table as its own row, flagged: it is materially cheaper than the sampling tier but is not a pure single-pass method. |
-| `single_pass_cheap` | 14 | Primary baseline set. |
+| `requires_bs1_under_fp16` | 4 | Consumes attention maps, which forces output_attentions=True. That disables transformers' left-padding NaN guard (AttentionMaskConverter._unmask_unattended runs only when _attn_implementation == 'sdpa' AND output_attentions is False), so under fp16 a fully-masked attention row overflows to -inf and softmax returns NaN -- observed as 108/150 generations collapsing to token 0. NOT excluded: run separately at batch_size=1 with eager attention, where no padding exists and therefore no attention row is ever fully masked. Reported as a secondary table at n=300. |
+| `single_pass_cheap` | 10 | Primary baseline set. |
 
 ## needs_train_data  (5)
 
@@ -66,13 +67,20 @@ Population: all 50 rows of upstream `examples/configs/estimators/default_estimat
 |---|---|---|---|
 | `CCP` | - | GreedyAlternativesNLICalculator,GreedyProbsCalculator | needs_auxiliary_model,single_pass_plus_aux_model |
 
-## single_pass_cheap  (14)
+## requires_bs1_under_fp16  (4)
 
 | Estimator | cfg | Resolved calculators | Flags |
 |---|---|---|---|
 | `AttentionScore (layer=None)` | gen_only=False | AttentionForwardPassCalculator,GreedyProbsCalculator | needs_attention |
-| `BoostedProbSequence` | - | GreedyProbsCalculator | - |
 | `CSL` | - | AttentionElicitingPromptCalculator,GreedyProbsCalculator | needs_attention |
+| `RAUQ` | alpha=0.2;use_entropy=False | GreedyProbsCalculator | needs_attention |
+| `RAUQ (entropy)` | alpha=0.8;use_entropy=True | EntropyCalculator,GreedyProbsCalculator | needs_attention |
+
+## single_pass_cheap  (10)
+
+| Estimator | cfg | Resolved calculators | Flags |
+|---|---|---|---|
+| `BoostedProbSequence` | - | GreedyProbsCalculator | - |
 | `FisherRao` | - | GreedyProbsCalculator | - |
 | `MaximumSequenceProbability` | - | GreedyProbsCalculator | - |
 | `MeanConditionalPointwiseMutualInformation` | - | EntropyCalculator,GreedyLMProbsCalculator,GreedyProbsCalculator | - |
@@ -80,7 +88,5 @@ Population: all 50 rows of upstream `examples/configs/estimators/default_estimat
 | `MeanTokenEntropy` | - | EntropyCalculator,GreedyProbsCalculator | - |
 | `PTrue` | - | GreedyProbsCalculator,PromptCalculator | - |
 | `Perplexity` | - | GreedyProbsCalculator | - |
-| `RAUQ` | alpha=0.2;use_entropy=False | GreedyProbsCalculator | needs_attention |
-| `RAUQ (entropy)` | alpha=0.8;use_entropy=True | EntropyCalculator,GreedyProbsCalculator | needs_attention |
 | `RenyiNeg` | - | GreedyProbsCalculator | - |
 | `SelfCertainty` | - | GreedyProbsCalculator | - |
