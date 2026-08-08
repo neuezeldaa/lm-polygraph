@@ -511,7 +511,32 @@ code(
 
 # 19 --------------------------------------------------------------------------
 md(
-    "## 21. Rank-correlation matrix — how many distinct signals are there?\n"
+    "## 21. Energy identity gate — `log p = E^m − E^l`\n"
+    "\n"
+    "Algebraically exact, but the two sides come from **different forward passes**:\n"
+    "`greedy_log_likelihoods` from incremental decoding with a KV cache, the energies\n"
+    "from a full-sequence teacher-forced prefill. In fp16 those paths diverge, and\n"
+    "the residual is exactly what `dE` inherits.\n"
+    "\n"
+    "`dE = Z_{j+1} − theta_j` is a **cancelling difference**: measured on this model,\n"
+    "|theta| ≈ 22.7 and |Z| ≈ 27.1 give |dE| ≈ 4.2, an amplification of ~6.5×. A\n"
+    "0.19 nat logit divergence becomes ~1.2 nats in `dE` before `max` pooling picks\n"
+    "the worst token — which is why two runs differing only in batch size and\n"
+    "attention kernel agreed on `dE` at only rho=0.29.\n"
+    "\n"
+    "**If this fails, do not report any `dE`-based result from the run.**"
+)
+code(
+    "for tag in ['A_baselines_n1000', 'B_ladder_n1000']:\n"
+    "    cmd = ('python harness/check_energy_identity.py'\n"
+    "           f\" --npz '{DRIVE}/{tag}/per_sample_seed1.npz'\")\n"
+    "    print('=' * 70); print(tag); print('=' * 70)\n"
+    "    !{cmd}"
+)
+
+# 22 --------------------------------------------------------------------------
+md(
+    "## 22. Rank-correlation matrix — how many distinct signals are there?\n"
     "\n"
     "PRR asks which estimator ranks best. This asks the prior question: how many\n"
     "**distinct measurements** are on the table at all. At n=150 the top of the table\n"
@@ -536,7 +561,7 @@ code(
 
 # 22 --------------------------------------------------------------------------
 md(
-    "## 22. The reported tables\n"
+    "## 23. The reported tables\n"
     "\n"
     "Primary metric is **normalized PRR@0.5** with bootstrap CIs. Everything on Drive,\n"
     "so tables can be rebuilt offline on CPU with\n"
