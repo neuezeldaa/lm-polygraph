@@ -51,15 +51,46 @@ class EnergyCalculator(StatCalculator):
             ["greedy_tokens"],
         )
 
-    def __init__(self, batch_chunk_size: int = 0):
+    def __init__(self, batch_chunk_size: int = 0, fp32_projection: bool = True,
+                 vocab_chunk: int = 32768):
         """
         Parameters:
             batch_chunk_size (int): if > 0, run the teacher-forced pass in chunks
                 of this many sequences to bound peak memory. 0 means one pass over
                 the whole batch.
+            fp32_projection (bool): recompute the final vocabulary projection in
+                float32 for the handful of rows actually used.
+
+                This matters because ``dE = Z_{j+1} - theta_j`` is a difference of
+                two large, similar quantities. Measured on Qwen2.5-3B/TriviaQA:
+                ``|theta| ~ 22.7``, ``|Z| ~ 27.1``, ``|dE| ~ 4.2`` -- a 6.5x
+                amplification, so any error in the logits is magnified 6.5x in dE,
+                and ``max`` pooling then selects the noisiest token. The lm_head
+                projection is a 2048-term dot product per vocabulary entry
+                accumulated in fp16, which is the largest single source of that
+                error. Only ``n_gen + 1`` rows are needed, so redoing just those in
+                float32 costs ~13 MB and removes the dominant term.
+            vocab_chunk (int): vocabulary chunk size for the fp32 projection, to
+                avoid materialising a float32 copy of the whole lm_head weight
+                (1.2 GB for a 152k vocabulary).
         """
         super().__init__()
         self.batch_chunk_size = batch_chunk_size
+        self.fp32_projection = fp32_projection
+        self.vocab_chunk = vocab_chunk
+
+    def _project_fp32(self, hidden_rows, lm_head):
+        """float32 logits for a few rows, chunked over the vocabulary."""
+        w = lm_head.weight
+        bias = getattr(lm_head, "bias", None)
+        h = hidden_rows.float()
+        out = torch.empty((h.shape[0], w.shape[0]), dtype=torch.float32, device=h.device)
+        for s in range(0, w.shape[0], self.vocab_chunk):
+            e = min(s + self.vocab_chunk, w.shape[0])
+            out[:, s:e] = h @ w[s:e].float().t()
+            if bias is not None:
+                out[:, s:e] += bias[s:e].float()
+        return out
 
     @staticmethod
     def _count_trailing_terminators(tokens, tokenizer) -> int:
@@ -196,11 +227,15 @@ class EnergyCalculator(StatCalculator):
         with torch.no_grad():
             for start in range(0, len(seqs), chunk):
                 stop = min(start + chunk, len(seqs))
+                lm_head = getattr(model.model, "lm_head", None)
+                use_fp32 = self.fp32_projection and lm_head is not None
                 out = model.model(
                     input_ids=input_ids[start:stop],
                     attention_mask=attention_mask[start:stop],
+                    output_hidden_states=use_fp32,
                 )
                 logits = out.logits  # [b, max_len, V]
+                hidden = out.hidden_states[-1] if use_fp32 else None
 
                 for local_i in range(stop - start):
                     i = start + local_i
@@ -217,7 +252,15 @@ class EnergyCalculator(StatCalculator):
                     # j = 0..n_gen for the log-partitions (one extra step).
                     first = p_len - 1
                     last = p_len - 1 + n_gen  # inclusive -> +1 in the slice
-                    rows = logits[local_i, first : last + 1, :].float()  # [n_gen+1, V]
+                    if hidden is not None:
+                        # Redo the projection in float32 for just these rows: dE is
+                        # a cancelling difference and inherits ~6.5x of any logit
+                        # error (see __init__).
+                        rows = self._project_fp32(
+                            hidden[local_i, first : last + 1, :], lm_head
+                        )
+                    else:
+                        rows = logits[local_i, first : last + 1, :].float()  # [n_gen+1, V]
 
                     lse = torch.logsumexp(rows, dim=-1)  # [n_gen+1]
 
@@ -236,7 +279,7 @@ class EnergyCalculator(StatCalculator):
                         self._count_trailing_terminators(greedy_tokens[i], tokenizer)
                     )
 
-                del out, logits
+                del out, logits, hidden
 
         return {
             "energy_token_logits": token_logits_out,
