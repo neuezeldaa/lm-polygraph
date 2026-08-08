@@ -17,7 +17,7 @@ from nbformat.v4 import new_notebook, new_code_cell, new_markdown_cell
 
 OUT = Path(__file__).resolve().parent.parent / "notebooks" / "spilled_energy_colab_t4.ipynb"
 
-REPO_URL = "https://github.com/<your-user>/lm-polygraph"
+REPO_URL = "https://github.com/neuezeldaa/lm-polygraph"
 BRANCH = "spilled-energy-experiments"
 MODEL = "Qwen/Qwen2.5-3B-Instruct"
 CFG_BASE = "configs/stage1/eval_triviaqa_qwen.yaml"
@@ -85,7 +85,7 @@ md(
     "Estimator, the tests and the configs."
 )
 code(
-    f"REPO_URL = {REPO_URL!r}  # <-- EDIT: your fork\n"
+    f"REPO_URL = {REPO_URL!r}\n"
     f"BRANCH   = {BRANCH!r}\n"
     "REPO     = '/content/lm-polygraph'\n"
     "\n"
