@@ -170,8 +170,46 @@ def test_spilled_energy_matches_hand_computation():
     assert got_neg[0] == pytest.approx(-expected_delta.max(), abs=1e-9)
 
 
+def test_logit_energy_and_the_decomposition_identity():
+    """E^l is the raw sampled-token logit, and E^l/E^m recompose the log-likelihood.
+
+    The point of exposing ``logit`` is that the ablation ladder differs by exactly
+    one ingredient per rung. That only holds if
+        log p(x_j) = theta_j[id] - Z_j = -E^l_j - (-E^m_j) = E^m_j - E^l_j
+    which is asserted here on values chosen so the arithmetic is checkable by hand.
+    """
+    theta = np.array(
+        [
+            [2.00, 1.00, 0.50, 0.00, -1.00],
+            [0.00, 3.00, 1.00, 0.50, 0.25],
+            [1.00, 1.00, 1.00, 1.00, 1.00],
+        ],
+        dtype=np.float64,
+    )
+    generated = [0, 1]
+    lse = np.array([float(torch.logsumexp(torch.tensor(r), dim=-1)) for r in theta])
+    tok_logits = np.array([theta[0, generated[0]], theta[1, generated[1]]])
+    stats = {"energy_token_logits": [tok_logits], "energy_lse": [lse]}
+
+    # E^l = -theta[id]; pooled with max -> max(-[2, 3]) = -2
+    got_logit = SpilledEnergy(variant="logit", pooling="max")(stats)
+    assert got_logit[0] == pytest.approx(-2.0, abs=1e-9)
+    got_logit_min = SpilledEnergy(variant="logit", pooling="min")(stats)
+    assert got_logit_min[0] == pytest.approx(-3.0, abs=1e-9)
+
+    # the identity, per token
+    e_l = -tok_logits
+    e_m = -lse[:2]
+    log_probs = e_m - e_l
+    expected_log_probs = tok_logits - lse[:2]
+    np.testing.assert_allclose(log_probs, expected_log_probs, atol=1e-12)
+    # and those are genuine log-probabilities
+    assert np.all(log_probs < 0)
+
+
 def test_spilled_energy_naming_and_validation():
     """__str__ must disambiguate configurations; bad args must raise."""
+    assert str(SpilledEnergy("logit", "max")) == "SpilledEnergy_logit_max"
     assert str(SpilledEnergy("spilled", "max")) == "SpilledEnergy_spilled_max"
     assert str(SpilledEnergy("marginal", "min")) == "SpilledEnergy_marginal_min"
     assert (

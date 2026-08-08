@@ -5,7 +5,7 @@ from typing import Dict
 from .estimator import Estimator
 
 
-VARIANTS = ("marginal", "spilled", "scaled_spilled")
+VARIANTS = ("logit", "marginal", "spilled", "scaled_spilled")
 POOLINGS = ("min", "max", "mean")
 
 
@@ -36,12 +36,22 @@ class SpilledEnergy(Estimator):
     opposite sign; the ``sign`` parameter below exists so the orientation is fixed
     empirically rather than by trusting either source -- see ``sign``.)
 
-    Three score variants are supported, all training-free, logits-only and
+    Four score variants are supported, all training-free, logits-only and
     computed from a single teacher-forced pass (see ``EnergyCalculator``):
 
+    * ``logit``          -- the logit energy ``E^l``
     * ``marginal``       -- the marginal energy ``E^m``
     * ``spilled``        -- the spilled energy ``dE``
     * ``scaled_spilled`` -- ``|E^m| * dE``
+
+    ``logit`` is the paper's own ``E^l`` baseline -- the negative raw logit of the
+    sampled token, i.e. classic logit confidence. It is included because it is one
+    of the two energies the method is derived from, so the implementation would be
+    incomplete without it, and because lm-polygraph cannot otherwise express it:
+    every other statistic is ``log_softmax``-normalised, which subtracts the
+    log-partition and destroys the raw logit (see ``EnergyCalculator``). Having it
+    here makes the decomposition testable -- ``logit`` vs ``marginal`` vs
+    ``spilled`` differ by exactly one ingredient at a time.
 
     Scores are pooled across the answer span with ``min``, ``max`` or ``mean``.
     """
@@ -88,6 +98,10 @@ class SpilledEnergy(Estimator):
         tok_logits = np.asarray(tok_logits, dtype=np.float64)
         lse = np.asarray(lse, dtype=np.float64)
         n = len(tok_logits)
+
+        if self.variant == "logit":
+            # logit energy: negative raw logit of the sampled token
+            return -tok_logits
 
         if self.variant == "marginal":
             # marginal energy at each generated token's own step
