@@ -1,0 +1,85 @@
+# A/B: does the trailing terminator belong in the pooling window?
+#
+# GreedyProbsCalculator trims with length = j+1, so the generation window INCLUDES
+# the terminator. For TriviaQA that is a trailing newline AND the EOS token: on a
+# median 4-token generation, HALF the pooled values are maximally predictable
+# tokens carrying near-constant scores unrelated to whether the answer is right.
+# Under mean pooling they dilute; under min pooling they can dominate every sample
+# and flatten the estimator toward a constant.
+#
+# Every estimator appears twice, identical except for exclude_terminator. The
+# pooled baselines get the same treatment -- otherwise the comparison would change
+# two things at once and stop being an ablation.
+#
+# Run at n=150 BEFORE the long runs. This is a direct measurement of how much the
+# localization ingredient contributes, which is the question the ladder exists to
+# answer.
+
+# --- reference baselines, unaffected by the switch --------------------------
+- name: MeanTokenEntropy
+- name: SelfCertainty
+- name: MaximumSequenceProbability
+
+# --- A: terminator INCLUDED (current behaviour) -----------------------------
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: min}
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: max}
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: mean}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: min}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: max}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: mean}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: min}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: max}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: mean}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: min}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: max}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: mean}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: min}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: max}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: mean}
+
+# --- B: terminator EXCLUDED -------------------------------------------------
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: mean, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: mean, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: mean, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: mean, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: min, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: max, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: mean, exclude_terminator: true}
