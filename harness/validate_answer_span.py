@@ -91,6 +91,16 @@ def main():
               + ("   <-- TRUNCATED: generation is NOT a complete short answer"
                  if at_ceiling / n > 0.10 else ""))
 
+    # Special tokens must never survive into greedy_texts: one is enough to make
+    # exact match impossible, and it means the generation was not trimmed at all.
+    SPECIALS = ("<|endoftext|>", "<|im_end|>", "<|im_start|>", "<pad>", "</s>", "<s>")
+    with_special = [t for t in texts if any(s in t for s in SPECIALS)]
+    print(f"  containing special tokens : {len(with_special)}/{n} = {len(with_special)/n:.1%}"
+          + ("   <-- NOT TRIMMED: exact match cannot succeed" if with_special else ""))
+    if with_special:
+        found = sorted({s for t in with_special for s in SPECIALS if s in t})
+        print(f"    tokens seen            : {found}")
+
     # exact match against gold, using the pipeline's own normalizer
     gen_metrics = (blob.get("gen_metrics") if isinstance(blob, dict) else blob.gen_metrics) or {}
     acc = None
@@ -111,7 +121,12 @@ def main():
         shown = t if len(t) < 90 else t[:90] + "..."
         print(f"  {ascii(shown)}")
 
-    verdict_ok = (single_line / n > 0.90) and (at_ceiling / n < 0.10) and (empty / n < 0.05)
+    verdict_ok = (
+        (single_line / n > 0.90)
+        and (at_ceiling / n < 0.10)
+        and (empty / n < 0.05)
+        and not with_special
+    )
     print("\n=== verdict ===")
     if verdict_ok:
         print("  OK: generations behave as short single-line answers;")
@@ -130,6 +145,7 @@ def main():
         "gen_len_p95": float(np.percentile(lens, 95)) if lens.size else None,
         "gen_len_max": int(lens.max()) if lens.size else None,
         "exact_match": float(acc.mean()) if acc is not None else None,
+        "with_special_tokens_frac": len(with_special) / n,
         "verdict_ok": bool(verdict_ok),
     }, indent=2), encoding="utf-8")
     print(f"\n[span] wrote {out}")
