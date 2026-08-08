@@ -28,13 +28,52 @@
 # Pooled_* live in harness/ (not the PR): lm-polygraph has no pooling
 # abstraction, and proposing a general one unsolicited would stall the method PR.
 
+
+# === PRIMARY: terminator EXCLUDED ===========================================
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: min, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: max, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: log_likelihood, pooling: mean, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: logit, pooling: mean, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: mean, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: mean, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: min, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: max, exclude_terminator: true}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: mean, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: entropy, pooling: min, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: entropy, pooling: max, exclude_terminator: true}
+- name: harness.pooled_baseline
+  cfg: {score: entropy, pooling: mean, exclude_terminator: true}
+
+# === SECONDARY: terminator INCLUDED (keeps the delta in the table) =========
 - name: harness.pooled_baseline
   cfg: {score: log_likelihood, pooling: min}
 - name: harness.pooled_baseline
   cfg: {score: log_likelihood, pooling: max}
 - name: harness.pooled_baseline
   cfg: {score: log_likelihood, pooling: mean}
-
 - name: SpilledEnergy
   cfg: {variant: logit, pooling: min}
 - name: SpilledEnergy
@@ -59,7 +98,6 @@
   cfg: {variant: scaled_spilled, pooling: max}
 - name: SpilledEnergy
   cfg: {variant: scaled_spilled, pooling: mean}
-
 - name: harness.pooled_baseline
   cfg: {score: entropy, pooling: min}
 - name: harness.pooled_baseline

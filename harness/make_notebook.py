@@ -511,7 +511,32 @@ code(
 
 # 19 --------------------------------------------------------------------------
 md(
-    "## 21. The reported tables\n"
+    "## 21. Rank-correlation matrix — how many distinct signals are there?\n"
+    "\n"
+    "PRR asks which estimator ranks best. This asks the prior question: how many\n"
+    "**distinct measurements** are on the table at all. At n=150 the top of the table\n"
+    "was a single cluster — `SpilledEnergy_marginal_mean` correlated with\n"
+    "`SelfCertainty` at rho=0.982 and with `MeanTokenEntropy` at 0.909, and\n"
+    "`marginal` vs `logit` reached **0.998** under matched pooling. Only 11 distinct\n"
+    "signals among 33 estimators.\n"
+    "\n"
+    "That reframes the question from *does SpilledEnergy beat the baselines* to\n"
+    "*is it distinguishable from what the library already shipped*. Run it on the\n"
+    "n=1000 tables and put both the clusters and the CSV in the report."
+)
+code(
+    "for tag in ['A_baselines_n1000', 'B_ladder_n1000']:\n"
+    "    cmd = ('python harness/correlation_matrix.py'\n"
+    "           f\" --npz '{DRIVE}/{tag}/per_sample_seed1.npz'\"\n"
+    "           f\" --out-md '{DRIVE}/{tag}/correlations.md'\"\n"
+    "           f\" --out-csv '{DRIVE}/{tag}/correlations.csv'\")\n"
+    "    print('=' * 70); print(tag); print('=' * 70)\n"
+    "    !{cmd}"
+)
+
+# 22 --------------------------------------------------------------------------
+md(
+    "## 22. The reported tables\n"
     "\n"
     "Primary metric is **normalized PRR@0.5** with bootstrap CIs. Everything on Drive,\n"
     "so tables can be rebuilt offline on CPU with\n"
