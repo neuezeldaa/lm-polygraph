@@ -1,0 +1,96 @@
+# =============================================================================
+# Stage 1 FROZEN experiment config — Spilled Energy baseline harness.
+#
+# Every later Stage (2+) reuses this file UNCHANGED for identical model / dataset
+# / generation settings. Do not hand-edit constants at run time; override on the
+# CLI only for throwaway debugging, never for reported numbers.
+#
+# Run with:
+#   HYDRA_CONFIG=$(pwd)/configs/stage1/eval_triviaqa_qwen.yaml polygraph_eval
+# (or via the runner: python stage1_run_baselines.py — see docs/stage1_baselines.md)
+#
+# ABLATION LADDER variant of the frozen config. Identical model / dataset /
+# decoding / seed / batch_size to eval_triviaqa_qwen.yaml -- ONLY the estimator
+# list differs -- so the two runs must produce byte-identical generations.
+# harness/check_run_consistency.py asserts exactly that; if it fails the two
+# tables are not comparable and must not be placed side by side.
+#
+# output_attentions is left at the default (true) ON PURPOSE. The ladder needs no
+# attention statistic and would run faster without it, but changing it would
+# change which stat calculators resolve, and therefore the kernels used -- under
+# fp16 that risks perturbing the generations. Speed is not worth breaking
+# comparability.
+#
+# Model:    Qwen/Qwen2.5-3B-Instruct, fp16, eager attention (T4-safe; recon §2,§7)
+# Dataset:  LM-Polygraph/triviaqa (continuation subset), test split
+# Decoding: greedy (do_sample=false), max_new_tokens=20, stop on newline, 5-shot
+# Quality:  AccuracyMetric = normalized exact match (recon §6)
+# Metric:   normalized PRR@0.5  -> results key "prr_0.5_normalized"
+#           (PredictionRejectionArea(max_rejection=0.5) is registered by the eval
+#            script automatically; recon §5)
+# Seed:     1  (transformers.set_seed; greedy decoding => deterministic given seed)
+# =============================================================================
+
+hydra:
+  run:
+    dir: ${cache_path}/${task}/${model.path}/${dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+defaults:
+  - model: qwen2.5-3b-instruct
+  - estimators: terminator_ab
+  - stat_calculators: auto
+  - base_processing_triviaqa
+  - _self_
+
+cache_path: ./workdir/stage1
+save_path: '${hydra:run.dir}'
+
+task: qa
+instruct: false            # continuation-style few-shot, matching lm-polygraph's published TriviaQA protocol
+
+# --- dataset ---------------------------------------------------------------
+dataset: ['LM-Polygraph/triviaqa', 'continuation']
+text_column: input
+label_column: output
+train_split: train
+eval_split: test
+few_shot_split: train
+n_shot: 5
+load_from_disk: false
+trust_remote_code: false
+multiref: true             # TriviaQA has multiple gold answers -> AggregatedMetric(max)
+size: 10000                  # cap rows loaded before subsampling
+subsample_eval_dataset: 150 # n>=1000: at n=300 the PRR spread (~+-0.05) cannot
+                             # support a baseline-vs-method claim. Override with
+                             # --samples for quick debugging only, never for
+                             # reported numbers.
+
+# --- generation (frozen) ---------------------------------------------------
+max_new_tokens: 20
+generation_params:
+  do_sample: false
+  num_beams: 1
+  temperature: 1.0
+  stop_strings:
+    - "\n"
+
+# --- quality / correctness function ---------------------------------------
+generation_metrics:
+  - name: AccuracyMetric   # normalized exact match (with base_processing_triviaqa)
+
+# --- caching: persist greedy generations so Stage 2 need not re-run the LLM --
+save_stats:
+  - greedy_texts
+  - greedy_tokens
+  - greedy_log_likelihoods
+
+# Same requirement as the primary config: the guard needs sdpa AND
+# output_attentions false. The ladder reads no attention statistic, so there is
+# no reason to enable it -- and leaving it unset would default to true and
+# silently reintroduce the fp16 overflow.
+output_attentions: false
+
+ignore_exceptions: false
+batch_size: 4
+seed:
+  - 1

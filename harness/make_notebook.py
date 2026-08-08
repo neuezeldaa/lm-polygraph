@@ -23,6 +23,7 @@ MODEL = "Qwen/Qwen2.5-3B-Instruct"
 CFG_BASE = "configs/stage1/eval_triviaqa_qwen.yaml"
 CFG_LADDER = "configs/stage1/eval_triviaqa_ladder.yaml"
 CFG_ATTN = "configs/stage1/eval_triviaqa_attention_bs1.yaml"
+CFG_TERM_AB = "configs/stage1/eval_triviaqa_terminator_ab.yaml"
 
 cells = []
 md = lambda s: cells.append(new_markdown_cell(s))
@@ -351,7 +352,52 @@ code(
 
 # 14 --------------------------------------------------------------------------
 md(
-    "## 14. Run A — primary baseline table, n=1000\n"
+    "## 14. Terminator A/B, n=150 — run this BEFORE A, B and C\n"
+    "\n"
+    "The pooling window currently **includes** the trailing terminator, because\n"
+    "`GreedyProbsCalculator` trims with `length = j + 1`. For TriviaQA that is a\n"
+    "trailing newline **and** the EOS token: on a median 4-token generation, **half**\n"
+    "the pooled values are maximally predictable tokens whose scores are near-constant\n"
+    "across samples and unrelated to correctness.\n"
+    "\n"
+    "Both settings run in ONE UEManager, so generations are identical and the window\n"
+    "is the only difference. The pooled baselines get the same treatment — otherwise\n"
+    "the comparison would change two things at once.\n"
+    "\n"
+    "~5 minutes, and it decides which configuration the 1.5–2 hour runs should use."
+)
+code(
+    "cmd = ('python harness/run_baselines.py'\n"
+    f"       ' --config {CFG_TERM_AB}'\n"
+    "       f\" --save-dir '{DRIVE}/AB_terminator_n150'\"\n"
+    "       ' --n-boot 0'\n"
+    f"       ' --expect-model {MODEL}')\n"
+    "print(cmd)\n"
+    "!{cmd}"
+)
+
+md(
+    "## 15. Terminator A/B — paired report\n"
+    "\n"
+    "Both columns side by side with the delta, grouped by pooling. `min` and `max`\n"
+    "are expected to move most: `min` can be dominated outright by a terminator, and\n"
+    "`mean` is diluted by it.\n"
+    "\n"
+    "**Paste this table back before starting the long runs.** If the effect is\n"
+    "negligible the terminator stays in and gets one sentence in the report; if it is\n"
+    "material the excluded version becomes primary and this becomes an ablation\n"
+    "finding in its own right."
+)
+code(
+    "cmd = ('python harness/terminator_ab_report.py'\n"
+    "       f\" --npz '{DRIVE}/AB_terminator_n150/per_sample_seed1.npz'\"\n"
+    "       f\" --out '{DRIVE}/AB_terminator_n150/terminator_ab.md'\")\n"
+    "!{cmd}"
+)
+
+# 16 --------------------------------------------------------------------------
+md(
+    "## 16. Run A — primary baseline table, n=1000\n"
     "\n"
     "The mechanically derived `single_pass_cheap` + `single_pass_plus_aux_model` tiers\n"
     "**and** all Spilled Energy variants, in one `UEManager` — so generations and\n"
@@ -372,7 +418,7 @@ code(
 
 # 15 --------------------------------------------------------------------------
 md(
-    "## 15. Run B — ablation ladder, n=1000\n"
+    "## 17. Run B — ablation ladder, n=1000\n"
     "\n"
     "Same window, same three poolings on every rung, so adjacent rungs differ by\n"
     "exactly one ingredient: pooled log-likelihood → E^l → E^m → ΔE → ΔE_s.\n"
@@ -391,7 +437,7 @@ code(
 
 # 16 --------------------------------------------------------------------------
 md(
-    "## 16. Are the two tables comparable? — hard gate\n"
+    "## 18. Are the two tables comparable? — hard gate\n"
     "\n"
     "Greedy decoding at a fixed seed *should* make the two runs byte-identical, but\n"
     "they resolve different stat calculators, and fp16 reductions are not associative.\n"
@@ -412,7 +458,7 @@ code(
 
 # 17 --------------------------------------------------------------------------
 md(
-    "## 17. Run C — attention baselines, batch_size=1, n=300\n"
+    "## 19. Run C — attention baselines, batch_size=1, n=300\n"
     "\n"
     "`RAUQ` x2, `CSL` and `AttentionScore` need `output_attentions=True`, which\n"
     "disables transformers' left-padding NaN guard. At `batch_size=1` there is no\n"
@@ -435,7 +481,7 @@ code(
 
 # 18 --------------------------------------------------------------------------
 md(
-    "## 18. Do Runs A and C agree? — SOFT gate, deliberately\n"
+    "## 20. Do Runs A and C agree? — SOFT gate, deliberately\n"
     "\n"
     "**Not** a byte-equality check, unlike cell 16. Run A uses sdpa and Run C uses\n"
     "eager — unavoidable, since sdpa cannot return attention weights. Those are\n"
@@ -465,7 +511,7 @@ code(
 
 # 19 --------------------------------------------------------------------------
 md(
-    "## 19. The reported tables\n"
+    "## 21. The reported tables\n"
     "\n"
     "Primary metric is **normalized PRR@0.5** with bootstrap CIs. Everything on Drive,\n"
     "so tables can be rebuilt offline on CPU with\n"

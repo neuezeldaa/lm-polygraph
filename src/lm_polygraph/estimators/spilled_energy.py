@@ -61,6 +61,7 @@ class SpilledEnergy(Estimator):
         variant: str = "spilled",
         pooling: str = "max",
         sign: int = 1,
+        exclude_terminator: bool = False,
     ):
         """
         Parameters:
@@ -78,14 +79,19 @@ class SpilledEnergy(Estimator):
         if sign not in (1, -1):
             raise ValueError(f"sign must be +1 or -1, got {sign!r}")
 
-        super().__init__(["energy_token_logits", "energy_lse"], "sequence")
+        deps = ["energy_token_logits", "energy_lse"]
+        if exclude_terminator:
+            deps.append("energy_trailing_terminators")
+        super().__init__(deps, "sequence")
         self.variant = variant
         self.pooling = pooling
         self.sign = sign
+        self.exclude_terminator = exclude_terminator
 
     def __str__(self):
         sign_tag = "" if self.sign == 1 else "_neg"
-        return f"SpilledEnergy_{self.variant}_{self.pooling}{sign_tag}"
+        term_tag = "_noterm" if self.exclude_terminator else ""
+        return f"SpilledEnergy_{self.variant}_{self.pooling}{sign_tag}{term_tag}"
 
     def _per_token_scores(self, tok_logits: np.ndarray, lse: np.ndarray) -> np.ndarray:
         """
@@ -129,16 +135,27 @@ class SpilledEnergy(Estimator):
         """
         all_tok_logits = stats["energy_token_logits"]
         all_lse = stats["energy_lse"]
+        trailing = (
+            stats["energy_trailing_terminators"] if self.exclude_terminator
+            else [0] * len(all_tok_logits)
+        )
 
         pool = {"min": np.min, "max": np.max, "mean": np.mean}[self.pooling]
 
         out = []
-        for tok_logits, lse in zip(all_tok_logits, all_lse):
+        for tok_logits, lse, n_term in zip(all_tok_logits, all_lse, trailing):
             n = len(tok_logits)
             if n == 0 or len(lse) < n + 1:
                 out.append(np.nan)
                 continue
             scores = self._per_token_scores(tok_logits, lse)
+            # Drop the trailing terminator tokens from the pooling window. On a
+            # ~4-token TriviaQA generation the newline and the EOS are half of it,
+            # and both are maximally predictable, so they carry near-constant
+            # scores unrelated to correctness.
+            if n_term:
+                keep = max(1, len(scores) - int(n_term))
+                scores = scores[:keep]
             scores = scores[np.isfinite(scores)]
             out.append(np.nan if scores.size == 0 else float(pool(scores)))
 

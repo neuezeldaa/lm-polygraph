@@ -101,6 +101,13 @@ def main():
     for pooling in ("min", "max", "mean"):
         estimators.append(factory("harness.pooled_baseline",
                                   {"score": "entropy", "pooling": pooling}))
+    # terminator-exclusion variants must resolve the extra stat end-to-end
+    estimators.append(factory("SpilledEnergy",
+                              {"variant": "logit", "pooling": "min",
+                               "exclude_terminator": True}))
+    estimators.append(factory("harness.pooled_baseline",
+                              {"score": "log_likelihood", "pooling": "min",
+                               "exclude_terminator": True}))
     print(f"[smoke] estimators: {[str(e) for e in estimators]}")
 
     scs = register_default_stat_calculators(
@@ -122,7 +129,7 @@ def main():
         ignore_exceptions=False,
         max_new_tokens=6,
         verbose=False,
-        save_stats=["greedy_texts", "greedy_tokens", "energy_token_logits", "energy_lse"],
+        save_stats=["greedy_texts", "greedy_tokens", "energy_token_logits", "energy_lse", "energy_trailing_terminators"],
     )
 
     print("[smoke] running pipeline ...")

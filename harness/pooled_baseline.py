@@ -56,15 +56,21 @@ class PooledBaseline(Estimator):
             already oriented that way.
     """
 
-    def __init__(self, score: str = "log_likelihood", pooling: str = "max", sign: int = None):
+    def __init__(self, score: str = "log_likelihood", pooling: str = "max",
+                 sign: int = None, exclude_terminator: bool = False):
         if score not in SCORES:
             raise ValueError(f"score must be one of {SCORES}, got {score!r}")
         if pooling not in POOLINGS:
             raise ValueError(f"pooling must be one of {POOLINGS}, got {pooling!r}")
 
-        super().__init__([_SCORE_STATS[score]], "sequence")
+        deps = [_SCORE_STATS[score]]
+        if exclude_terminator:
+            # produced by EnergyCalculator, which knows the tokenizer
+            deps.append("energy_trailing_terminators")
+        super().__init__(deps, "sequence")
         self.score = score
         self.pooling = pooling
+        self.exclude_terminator = exclude_terminator
         if sign is None:
             sign = -1 if score == "log_likelihood" else 1
         if sign not in (1, -1):
@@ -73,15 +79,25 @@ class PooledBaseline(Estimator):
 
     def __str__(self):
         tag = "" if self.sign == (-1 if self.score == "log_likelihood" else 1) else "_flip"
-        return f"Pooled_{self.score}_{self.pooling}{tag}"
+        term = "_noterm" if self.exclude_terminator else ""
+        return f"Pooled_{self.score}_{self.pooling}{tag}{term}"
 
     def __call__(self, stats: Dict[str, np.ndarray]) -> np.ndarray:
         per_token = stats[_SCORE_STATS[self.score]]
+        trailing = (
+            stats["energy_trailing_terminators"] if self.exclude_terminator
+            else [0] * len(per_token)
+        )
         pool = {"min": np.min, "max": np.max, "mean": np.mean}[self.pooling]
 
         out = []
-        for seq in per_token:
+        for seq, n_term in zip(per_token, trailing):
             arr = np.asarray(seq, dtype=np.float64)
+            # Same window as SpilledEnergy: the ablation is only valid if BOTH
+            # sides drop the terminator, otherwise the comparison changes two
+            # things at once.
+            if n_term:
+                arr = arr[: max(1, len(arr) - int(n_term))]
             arr = arr[np.isfinite(arr)]
             if arr.size == 0:
                 out.append(np.nan)

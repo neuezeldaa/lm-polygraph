@@ -46,7 +46,10 @@ class EnergyCalculator(StatCalculator):
         """
         Returns the statistics and dependencies for the calculator.
         """
-        return ["energy_token_logits", "energy_lse"], ["greedy_tokens"]
+        return (
+            ["energy_token_logits", "energy_lse", "energy_trailing_terminators"],
+            ["greedy_tokens"],
+        )
 
     def __init__(self, batch_chunk_size: int = 0):
         """
@@ -57,6 +60,37 @@ class EnergyCalculator(StatCalculator):
         """
         super().__init__()
         self.batch_chunk_size = batch_chunk_size
+
+    @staticmethod
+    def _count_trailing_terminators(tokens, tokenizer) -> int:
+        """How many tokens at the END of a generation are terminators.
+
+        A terminator here is the EOS/pad id, or a token that decodes to nothing
+        but whitespace (the trailing newline that ``stop_strings: ["\\n"]``
+        produces). Counted from the end and stopping at the first real token, so
+        whitespace inside an answer is never touched.
+
+        Why this matters for pooling: GreedyProbsCalculator trims with
+        ``length = j + 1``, so the terminator is INSIDE ``greedy_tokens`` and
+        therefore inside the pooling window. TriviaQA answers are short -- a
+        median generation is ~4 tokens, of which the newline and the EOS are two.
+        Roughly half of the window is then a maximally predictable token whose
+        score is near-constant across samples and unrelated to correctness, which
+        dilutes mean pooling and can dominate min pooling outright.
+
+        At least one token is always kept, so a degenerate all-whitespace
+        generation still yields a score rather than an empty window.
+        """
+        eos = {tokenizer.eos_token_id, tokenizer.pad_token_id} - {None}
+        n = 0
+        for tid in reversed(list(tokens)):
+            if len(tokens) - n <= 1:
+                break
+            if tid in eos or tokenizer.decode([tid]).strip() == "":
+                n += 1
+            else:
+                break
+        return n
 
     @staticmethod
     def _assert_finite(tok_logits, lse, rows, sample_idx: int) -> None:
@@ -157,6 +191,7 @@ class EnergyCalculator(StatCalculator):
         chunk = self.batch_chunk_size if self.batch_chunk_size > 0 else len(seqs)
         token_logits_out: List[np.ndarray] = []
         lse_out: List[np.ndarray] = []
+        trailing_out: List[int] = []
 
         with torch.no_grad():
             for start in range(0, len(seqs), chunk):
@@ -174,6 +209,7 @@ class EnergyCalculator(StatCalculator):
                     if n_gen == 0:
                         token_logits_out.append(np.zeros(0, dtype=np.float32))
                         lse_out.append(np.zeros(0, dtype=np.float32))
+                        trailing_out.append(0)
                         continue
 
                     # Position p_len - 1 + j predicts generated token j.
@@ -196,10 +232,14 @@ class EnergyCalculator(StatCalculator):
                         tok_logits.cpu().numpy().astype(np.float32, copy=False)
                     )
                     lse_out.append(lse.cpu().numpy().astype(np.float32, copy=False))
+                    trailing_out.append(
+                        self._count_trailing_terminators(greedy_tokens[i], tokenizer)
+                    )
 
                 del out, logits
 
         return {
             "energy_token_logits": token_logits_out,
             "energy_lse": lse_out,
+            "energy_trailing_terminators": trailing_out,
         }
