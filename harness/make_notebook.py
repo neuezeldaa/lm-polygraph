@@ -435,24 +435,31 @@ code(
 
 # 18 --------------------------------------------------------------------------
 md(
-    "## 18. Does batch size change the generations? — hard gate\n"
+    "## 18. Do Runs A and C agree? — SOFT gate, deliberately\n"
     "\n"
-    "With the fix in place `batch_size` must not affect generation at all, so Run C\n"
-    "(bs=1, n=300) and Run A (bs=4, n=1000) must agree on their shared 300 samples.\n"
-    "This is the property `test_batched_generation_matches_individual` asserts on a\n"
-    "stub; here it is verified by hash on the real data.\n"
+    "**Not** a byte-equality check, unlike cell 16. Run A uses sdpa and Run C uses\n"
+    "eager — unavoidable, since sdpa cannot return attention weights. Those are\n"
+    "different kernels and round differently in fp16, so where the top two candidates\n"
+    "are nearly tied the argmax can legitimately flip. A hash gate would fire on\n"
+    "correct behaviour.\n"
+    "\n"
+    "So this reports the mismatch **fraction** and fails only above a tolerance:\n"
+    "a handful of samples is expected kernel noise; several percent means something\n"
+    "is genuinely wrong — check the degeneracy gate passed for *both* runs, since a\n"
+    "collapsed run differs from a healthy one almost everywhere.\n"
+    "\n"
+    "**Report the printed fraction alongside the secondary table.**\n"
     "\n"
     "`--allow-prefix` is sound because `Dataset.subsample` uses `np.random.choice`\n"
     "under a fixed seed, which is prefix-stable — the n=300 subsample is exactly the\n"
-    "first 300 of the n=1000 one (asserted by `test_subsample_is_prefix_stable`).\n"
-    "\n"
-    "If this fails, the bs=1 table must NOT be placed beside the primary table."
+    "first 300 of the n=1000 one (asserted by `test_subsample_is_prefix_stable`)."
 )
 code(
     "cmd = ('python harness/check_run_consistency.py'\n"
     "       f\" --a '{DRIVE}/A_baselines_n1000'\"\n"
     "       f\" --b '{DRIVE}/C_attention_bs1_n300'\"\n"
-    "       ' --label-a bs4_primary --label-b bs1_attention --allow-prefix')\n"
+    "       ' --label-a bs4_sdpa --label-b bs1_eager'\n"
+    "       ' --allow-prefix --max-mismatch-frac 0.02')\n"
     "!{cmd}"
 )
 

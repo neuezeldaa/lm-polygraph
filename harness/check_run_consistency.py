@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
-"""Assert that two runs produced BYTE-IDENTICAL generations, and fail loudly if not.
+"""Check that two runs saw the same generations, and fail loudly when they did not.
 
-The baseline table and the ablation-ladder table come from two separate
-UEManager runs. They are only comparable if both saw exactly the same
+Tables from separate UEManager runs are only comparable if both saw the same
 generations -- otherwise the quality vector differs, the PRR normalisation
 differs, and the two tables silently stop being about the same thing.
 
-Greedy decoding with a fixed seed *should* guarantee this. But the two runs do
-not resolve identical stat calculators (the baseline run captures attention and
-loads an NLI model; the ladder run does not), which can change kernel selection,
-and fp16 reductions are not associative. So this is verified, not assumed.
+Greedy decoding with a fixed seed *should* guarantee that, but it is verified
+rather than assumed: runs can resolve different stat calculators, and fp16
+reductions are not associative.
 
-Checks, all hard failures:
-  * same number of samples
-  * sha256 of greedy_texts identical
-  * sha256 of greedy_tokens identical
-  * quality (Accuracy) vector identical elementwise, and its mean identical
+Two modes, because not every pair of runs CAN be byte-identical.
+
+STRICT (default, --max-mismatch-frac 0) -- for runs sharing an attention
+implementation, e.g. the primary baseline run vs the ablation ladder. They differ
+only in their estimator list, so identical generations are a real requirement and
+any difference is a bug. Compares sha256 of greedy_texts and greedy_tokens, and
+the quality vector elementwise.
+
+SOFT (--max-mismatch-frac > 0) -- for runs that legitimately differ, e.g. the
+primary run (sdpa) vs the attention run (eager, forced because sdpa cannot return
+attention weights). Different kernels round differently in fp16, so where the top
+two candidates are nearly tied the argmax can flip. Byte equality would fail on
+correct behaviour. This mode reports the mismatch count and fraction, shows
+examples, and fails only above the given tolerance: a handful is kernel noise,
+several percent means something is actually wrong.
 
 Exit code 0 = comparable. Exit code 1 = DO NOT compare these tables.
 
 Usage:
-    python harness/check_run_consistency.py --a <dir> --b <dir>
+    # strict, for A vs B (same attention implementation)
+    python harness/check_run_consistency.py --a <dirA> --b <dirB>
+
+    # soft, for A vs C (sdpa vs eager)
+    python harness/check_run_consistency.py --a <dirA> --b <dirC>
+        --allow-prefix --max-mismatch-frac 0.02
 """
 
 import argparse
@@ -82,6 +95,12 @@ def main():
     ap.add_argument("--b", type=Path, required=True, help="Second run directory.")
     ap.add_argument("--label-a", default="run A")
     ap.add_argument("--label-b", default="run B")
+    ap.add_argument("--max-mismatch-frac", type=float, default=0.0,
+                    help="0 (default) = strict byte equality, for runs sharing an "
+                         "attention implementation. A positive value switches to a "
+                         "SOFT comparison, for runs that legitimately differ: sdpa "
+                         "and eager are different kernels and round differently in "
+                         "fp16, so a near-tied argmax can flip on a few samples.")
     ap.add_argument("--allow-prefix", action="store_true",
                     help="Runs may differ in n; compare their shared prefix. Valid "
                          "because Dataset.subsample is prefix-stable under a fixed seed.")
@@ -125,60 +144,83 @@ def main():
                 d[key] = d[key][:k]
 
     ha, hb = sha(A["texts"]), sha(B["texts"])
-    print(f"  sha256 greedy_texts: {ha[:16]}...  vs  {hb[:16]}...")
-    if ha != hb:
-        failures.append("greedy_texts differ")
-
     ta, tb = sha(A["tokens"]), sha(B["tokens"])
+    print(f"  sha256 greedy_texts : {ha[:16]}...  vs  {hb[:16]}...")
     print(f"  sha256 greedy_tokens: {ta[:16]}...  vs  {tb[:16]}...")
-    if ta != tb:
-        failures.append("greedy_tokens differ")
+
+    mismatched = [
+        i for i, (x, y) in enumerate(zip(A["texts"] or [], B["texts"] or [])) if x != y
+    ]
+    frac = (len(mismatched) / k) if k else 1.0
+    print(f"  generations differing: {len(mismatched)}/{k} = {frac:.2%}")
+
+    strict = args.max_mismatch_frac <= 0
+    if strict:
+        if ha != hb:
+            failures.append("greedy_texts differ")
+        if ta != tb:
+            failures.append("greedy_tokens differ")
+    elif frac > args.max_mismatch_frac:
+        failures.append(
+            f"{len(mismatched)}/{k} generations differ ({frac:.2%}), above the "
+            f"tolerance of {args.max_mismatch_frac:.2%}"
+        )
 
     qa, qb = A["quality"], B["quality"]
     if qa is None or qb is None:
         failures.append("a quality vector is missing")
     else:
-        print(f"\n  quality metric     : {A['quality_name']}  vs  {B['quality_name']}")
-        print(f"  quality mean       : {qa.mean():.6f}  vs  {qb.mean():.6f}")
+        print(f"\n  quality metric      : {A['quality_name']}  vs  {B['quality_name']}")
+        print(f"  quality mean        : {qa.mean():.6f}  vs  {qb.mean():.6f}"
+              f"   (delta {abs(qa.mean()-qb.mean()):.6f})")
         if qa.shape != qb.shape:
             failures.append(f"quality shape differs ({qa.shape} vs {qb.shape})")
         elif not np.array_equal(qa, qb):
             n_diff = int((qa != qb).sum())
-            failures.append(
-                f"quality vector differs in {n_diff}/{qa.size} positions "
-                f"(means {qa.mean():.6f} vs {qb.mean():.6f})"
-            )
+            msg = (f"quality vector differs in {n_diff}/{qa.size} positions "
+                   f"(means {qa.mean():.6f} vs {qb.mean():.6f})")
+            if strict:
+                failures.append(msg)
+            else:
+                print(f"  NOTE: {msg}")
 
-    # if texts differ, show the first few so the cause is visible.
-    # ascii() so a console with a narrow codepage cannot raise here -- this block
-    # runs only on failure, and crashing would swallow the verdict below.
-    if A["texts"] and B["texts"] and ha != hb:
-        print("\n  first differing generations:")
-        shown = 0
-        for i, (x, y) in enumerate(zip(A["texts"], B["texts"])):
-            if x != y:
-                print(f"    [{i}] {args.label_a}: {ascii(x)}")
-                print(f"    [{i}] {args.label_b}: {ascii(y)}")
-                shown += 1
-                if shown >= 3:
-                    break
+    # ascii() so a narrow console codepage cannot raise here and swallow the verdict
+    if mismatched:
+        print(f"\n  first differing generations (of {len(mismatched)}):")
+        for i in mismatched[:5]:
+            print(f"    [{i}] {args.label_a}: {ascii(A['texts'][i])}")
+            print(f"    [{i}] {args.label_b}: {ascii(B['texts'][i])}")
 
     print("\n" + "=" * 70)
     if failures:
         print("VERDICT: NOT COMPARABLE")
         for f in failures:
             print(f"  - {f}")
-        print(
-            "\nThe two tables are NOT about the same generations, so their PRR values\n"
-            "cannot be placed side by side. Most likely cause: the runs resolved\n"
-            "different stat calculators (attention capture on in one, off in the\n"
-            "other), changing kernel selection under fp16. Fix by making the two\n"
-            "configs agree on output_attentions, then re-run."
-        )
+        if strict:
+            print(
+                "\nThese two runs share an attention implementation, so their\n"
+                "generations must match exactly. A difference means the runs resolved\n"
+                "different stat calculators or different generation settings. Fix the\n"
+                "configs and re-run; do not place the tables side by side."
+            )
+        else:
+            print(
+                "\nToo many generations differ to attribute this to kernel rounding.\n"
+                "Check that the two configs agree on model, decoding parameters, seed\n"
+                "and subsample, and that the degeneracy gate passed for BOTH runs --\n"
+                "a collapsed run will differ from a healthy one almost everywhere."
+            )
         print("=" * 70)
         return 1
 
-    print("VERDICT: COMPARABLE -- generations and quality are identical.")
+    if strict:
+        print("VERDICT: COMPARABLE -- generations and quality are identical.")
+    else:
+        print(f"VERDICT: COMPARABLE -- {len(mismatched)}/{k} generations differ "
+              f"({frac:.2%}), within the {args.max_mismatch_frac:.2%} tolerance.")
+        print("  Expected: these runs use different attention kernels (sdpa vs eager),")
+        print("  which round differently in fp16, so a near-tied argmax can flip.")
+        print("  The tables remain comparable, but report this fraction alongside them.")
     print("=" * 70)
     return 0
 

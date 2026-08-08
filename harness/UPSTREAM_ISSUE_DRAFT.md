@@ -1,4 +1,14 @@
-# DRAFT — upstream issue for IINemo/lm-polygraph. NOT FILED. Review before submitting.
+# DRAFT — upstream issue for IINemo/lm-polygraph.
+#
+# STATUS: **ON HOLD. NOT FILED.**
+#
+# Held deliberately until the n=150 pass succeeds under the fixed configuration.
+# Everything below is currently argued from reading transformers and lm-polygraph
+# source plus a CPU reproduction of the sanitizer. That is strong, but filing an
+# analysis of someone else's bug without an empirical confirmation of the full
+# chain is a risk not worth taking when waiting costs two days. Once the run
+# passes, the 'How we hit it' section can cite a before/after result rather than
+# an inference, and the tone should be re-reviewed before submitting.
 
 ---
 
