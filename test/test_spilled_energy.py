@@ -270,3 +270,69 @@ def test_spilled_energy_handles_degenerate_samples():
     out = SpilledEnergy(variant="spilled", pooling="max")(stats)
     assert np.isnan(out[0])
     assert out[1] == pytest.approx(3.0 - 1.0, abs=1e-9)
+
+
+def test_terminator_exclusion_trims_the_pooling_window():
+    """exclude_terminator must drop exactly the trailing terminator tokens.
+
+    On a TriviaQA generation the window is ~4 tokens and the trailing newline
+    plus the EOS are two of them, so half the pooled values are maximally
+    predictable tokens whose scores are near-constant across samples and
+    unrelated to correctness.
+    """
+    # 4 generated tokens; the last two are the terminator pair
+    tok_logits = np.array([5.0, 6.0, 20.0, 25.0])   # terminators have high logits
+    lse = np.array([7.0, 8.0, 21.0, 26.0, 27.0])
+    stats_in = {
+        "energy_token_logits": [tok_logits],
+        "energy_lse": [lse],
+        "energy_trailing_terminators": [2],
+    }
+
+    # E^l = -tok_logits. Including terminators, max is -5.0; excluding, still -5.0,
+    # but MIN changes from -25.0 (a terminator) to -6.0 (a real answer token).
+    incl_min = SpilledEnergy(variant="logit", pooling="min")(stats_in)[0]
+    excl_min = SpilledEnergy(variant="logit", pooling="min",
+                             exclude_terminator=True)(stats_in)[0]
+    assert incl_min == pytest.approx(-25.0)
+    assert excl_min == pytest.approx(-6.0), "min pooling still sees the terminator"
+
+    # mean is diluted by the terminators too
+    incl_mean = SpilledEnergy(variant="logit", pooling="mean")(stats_in)[0]
+    excl_mean = SpilledEnergy(variant="logit", pooling="mean",
+                              exclude_terminator=True)(stats_in)[0]
+    assert incl_mean == pytest.approx(-14.0)
+    assert excl_mean == pytest.approx(-5.5)
+
+    # naming must distinguish the two, or UEManager would reject the pair
+    assert str(SpilledEnergy(variant="logit", pooling="min")) != str(
+        SpilledEnergy(variant="logit", pooling="min", exclude_terminator=True))
+
+    # a window that is ALL terminators must still yield a score, not an empty pool
+    degenerate = {
+        "energy_token_logits": [np.array([3.0, 4.0])],
+        "energy_lse": [np.array([5.0, 6.0, 7.0])],
+        "energy_trailing_terminators": [2],
+    }
+    out = SpilledEnergy(variant="logit", pooling="min",
+                        exclude_terminator=True)(degenerate)[0]
+    assert np.isfinite(out), "over-trimmed to an empty window"
+
+
+def test_trailing_terminator_count_is_correct():
+    """The counter must stop at the first real token and never empty the window."""
+    from lm_polygraph.stat_calculators.energy import EnergyCalculator
+
+    class FakeTok:
+        eos_token_id, pad_token_id = 99, 98
+        def decode(self, ids):
+            return {1: "fr", 2: "iday", 3: "\n", 4: " ", 5: "x"}.get(ids[0], "?")
+
+    tok = FakeTok()
+    count = EnergyCalculator._count_trailing_terminators
+    assert count([1, 2, 3, 99], tok) == 2      # newline + eos
+    assert count([1, 2, 99], tok) == 1         # eos only
+    assert count([1, 2], tok) == 0             # no terminator
+    assert count([1, 3, 4, 99], tok) == 3      # newline, space, eos
+    assert count([3, 3, 3], tok) == 2          # all terminators -> keeps one
+    assert count([1, 99, 2], tok) == 0         # eos mid-sequence is not trailing
