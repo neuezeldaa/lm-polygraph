@@ -23,6 +23,8 @@ import argparse
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 TINY_MODEL = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
 
 QA = [
@@ -87,11 +89,18 @@ def main():
         factory("Perplexity", {}),
         factory("MeanTokenEntropy", {}),
         factory("SelfCertainty", {}),
-        factory("SpilledEnergy", {"variant": "marginal", "pooling": "max"}),
-        factory("SpilledEnergy", {"variant": "spilled", "pooling": "max"}),
-        factory("SpilledEnergy", {"variant": "spilled", "pooling": "min"}),
-        factory("SpilledEnergy", {"variant": "scaled_spilled", "pooling": "max"}),
     ]
+    # the full ablation ladder: each adjacent rung differs by one ingredient
+    for pooling in ("min", "max", "mean"):
+        estimators.append(factory("harness.pooled_baseline",
+                                  {"score": "log_likelihood", "pooling": pooling}))
+    for variant in ("logit", "marginal", "spilled", "scaled_spilled"):
+        for pooling in ("min", "max", "mean"):
+            estimators.append(factory("SpilledEnergy",
+                                      {"variant": variant, "pooling": pooling}))
+    for pooling in ("min", "max", "mean"):
+        estimators.append(factory("harness.pooled_baseline",
+                                  {"score": "entropy", "pooling": pooling}))
     print(f"[smoke] estimators: {[str(e) for e in estimators]}")
 
     scs = register_default_stat_calculators(

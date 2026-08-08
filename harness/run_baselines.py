@@ -120,6 +120,9 @@ def run_eval(config, save_dir, samples, seed, extra_overrides):
     save_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["HYDRA_CONFIG"] = str(config)
+    # let the subprocess import harness.* estimators referenced by dotted path
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
     overrides = [f"save_path={save_dir.as_posix()}"]
     if samples is not None:
