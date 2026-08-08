@@ -146,8 +146,19 @@ def run_eval(config, save_dir, samples, seed, extra_overrides):
         sys.exit(f"[run] polygraph_eval failed with code {proc.returncode}")
 
 
-def preflight_config(config: Path):
-    """Verify the config saves generations BEFORE burning a long run."""
+def preflight_config(config: Path, expect_model: str = None):
+    """Print model provenance and verify the config saves generations,
+    BEFORE burning a long run."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from provenance import report
+
+        report(config, expect_model)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"[preflight] WARNING: could not resolve model provenance: {e}")
+
     try:
         import yaml
 
@@ -332,6 +343,8 @@ def main():
                     help="Bootstrap resamples for the CI (0 disables).")
     ap.add_argument("--acc-min", type=float, default=0.10)
     ap.add_argument("--acc-max", type=float, default=0.90)
+    ap.add_argument("--expect-model", default=None,
+                    help="Fail unless the config resolves to this model.path.")
     ap.add_argument("--quality", default=None,
                     help="Name of the quality function to report against "
                          "(default: all present).")
@@ -344,7 +357,7 @@ def main():
         cfg = args.config.resolve()
         if not cfg.exists():
             sys.exit(f"config not found: {cfg}")
-        preflight_config(cfg)
+        preflight_config(cfg, args.expect_model)
         run_eval(cfg, args.save_dir, args.samples, args.seed, args.overrides)
 
     files = sorted(glob.glob(str(args.save_dir / "ue_manager_seed*")))

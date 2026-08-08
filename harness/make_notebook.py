@@ -104,7 +104,19 @@ cells.append(new_code_cell(
 
 # --- cell 5: unit tests ----------------------------------------------------
 cells.append(new_markdown_cell(
-    "## 5. Run the unit tests (seconds, CPU)\n"
+    "## 5. Model provenance — what this config ACTUALLY resolves to\n"
+    "\n"
+    "Printed before anything else touches the model. `--expect` makes a silent model\n"
+    "swap fail the run rather than produce numbers of unclear origin. Read the\n"
+    "`model.path`, `dtype` and `device` lines and confirm them against the report."
+))
+cells.append(new_code_cell(
+    "!python harness/provenance.py --config configs/stage1/eval_triviaqa_qwen.yaml "
+    "--expect Qwen/Qwen2.5-3B-Instruct"
+))
+
+cells.append(new_markdown_cell(
+    "## 6. Run the unit tests (seconds, CPU)\n"
     "\n"
     "Cheap guard that the install is sane before the long run."
 ))
@@ -114,7 +126,7 @@ cells.append(new_code_cell(
 
 # --- cell 6: sign check ----------------------------------------------------
 cells.append(new_markdown_cell(
-    "## 6. Fix the sign on a dev subset\n"
+    "## 7. Fix the sign on a dev subset\n"
     "\n"
     "A wrong sign yields a large **negative** normalized PRR (~-0.7), which reads as a\n"
     "broken method rather than an inverted score. Settle it on ~150 examples before\n"
@@ -125,14 +137,15 @@ cells.append(new_code_cell(
     "cmd = (\"python harness/run_baselines.py\"\n"
     "       \" --config configs/stage1/eval_triviaqa_qwen.yaml\"\n"
     "       f\" --save-dir '{DRIVE_OUT}/dev_signcheck'\"\n"
-    "       \" --samples 150 --n-boot 0\")\n"
+    "       \" --samples 150 --n-boot 0\"\n"
+    "       \" --expect-model Qwen/Qwen2.5-3B-Instruct\")\n"
     "print(cmd)\n"
     "!{cmd}"
 ))
 
 # --- cell 7: final run -----------------------------------------------------
 cells.append(new_markdown_cell(
-    "## 7. Final run — all estimators, one pass, n=1000\n"
+    "## 8. Final run — all estimators, one pass, n=1000\n"
     "\n"
     "Baselines and SpilledEnergy share one `UEManager`, so generations and generation\n"
     "settings are identical by construction (fp16 + different batch composition can\n"
@@ -146,14 +159,15 @@ cells.append(new_code_cell(
     "cmd = (\"python harness/run_baselines.py\"\n"
     "       \" --config configs/stage1/eval_triviaqa_qwen.yaml\"\n"
     "       f\" --save-dir '{DRIVE_OUT}/final_n1000'\"\n"
-    "       \" --n-boot 1000\")\n"
+    "       \" --n-boot 1000\"\n"
+    "       \" --expect-model Qwen/Qwen2.5-3B-Instruct\")\n"
     "print(cmd)\n"
     "!{cmd}"
 ))
 
 # --- cell 8: show the table ------------------------------------------------
 cells.append(new_markdown_cell(
-    "## 8. The reported table\n"
+    "## 9. The reported table\n"
     "\n"
     "`per_sample_seed1.npz` is on Drive too — the table can be rebuilt offline on CPU\n"
     "with `python harness/run_baselines.py --skip-run --save-dir <dir>`."
