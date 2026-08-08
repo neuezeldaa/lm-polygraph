@@ -1,0 +1,12 @@
+# Lean stat-calculator set for Stage 1.
+#
+# "auto" expands to register_default_stat_calculators("Whitebox", ...), which
+# includes GreedyProbsCalculator (produces greedy_log_probs / greedy_tokens /
+# greedy_log_likelihoods), EntropyCalculator, GreedyLMProbsCalculator and the
+# prompt calculators needed by the Stage 1 estimators.
+#
+# We deliberately do NOT use the examples/configs/stat_calculators/default_calculators
+# group: it also registers TrainingStatisticExtractionCalculator, which downloads
+# an allenai/c4 background shard and builds train embeddings — only needed for
+# Mahalanobis/RDE/Density estimators, none of which are in the Stage 1 baseline set.
+- auto

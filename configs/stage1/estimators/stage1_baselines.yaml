@@ -1,0 +1,45 @@
+# Stage 1 baseline estimators — sequence level, logits-only, single forward pass
+# (plus one cheap extra pass for PMI / p(true)). No sampling, no NLI/DeBERTa,
+# no ensembles, no training statistics. These are the honest comparison points
+# for Spilled Energy, which is itself training-free and logits-only.
+#
+# dependency notes (see docs/stage1_recon.md §4):
+#   MaximumSequenceProbability  <- greedy_log_likelihoods
+#   Perplexity                  <- greedy_log_likelihoods
+#   MeanTokenEntropy            <- entropy (<- greedy_log_probs)
+#   SelfCertainty              <- greedy_log_probs   (closest existing logit-confidence proxy)
+#   MeanPointwiseMutualInformation <- greedy_log_likelihoods + greedy_lm_log_likelihoods (1 extra fwd pass)
+#   PTrue                      <- p_true (PromptCalculator re-prompts the model; 1 extra fwd pass)
+#   RenyiNeg                   <- greedy_log_probs
+#   FisherRao                  <- greedy_log_probs
+#
+# NOTE: the paper's E^l ("logit confidence") baseline uses the *raw* logit of the
+# sampled token. lm-polygraph has no raw-logit estimator (all stats are log_softmax'd,
+# recon §4), so the true E^l analogue only becomes available with the Stage 2
+# StatCalculator. MSP / SelfCertainty are the closest Stage 1 stand-ins.
+- name: MaximumSequenceProbability
+- name: Perplexity
+- name: MeanTokenEntropy
+- name: SelfCertainty
+- name: MeanPointwiseMutualInformation
+- name: PTrue
+- name: RenyiNeg
+- name: FisherRao
+
+# --- Spilled Energy (the method under test) --------------------------------
+# All variants x poolings are evaluated in the SAME UEManager run as the
+# baselines above, so generations and generation settings are identical by
+# construction. `sign` is fixed empirically on a dev subset before the final run
+# (a wrong sign shows up as a large NEGATIVE normalized PRR, not as noise).
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: min}
+- name: SpilledEnergy
+  cfg: {variant: marginal, pooling: max}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: min}
+- name: SpilledEnergy
+  cfg: {variant: spilled, pooling: max}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: min}
+- name: SpilledEnergy
+  cfg: {variant: scaled_spilled, pooling: max}

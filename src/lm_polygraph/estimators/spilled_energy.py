@@ -1,0 +1,131 @@
+import numpy as np
+
+from typing import Dict
+
+from .estimator import Estimator
+
+
+VARIANTS = ("marginal", "spilled", "scaled_spilled")
+POOLINGS = ("min", "max", "mean")
+
+
+class SpilledEnergy(Estimator):
+    """
+    Spilled Energy uncertainty estimator.
+
+    Reference:
+        "Spilled Energy in Large Language Models", Minut, Dewidar & Masi,
+        ICLR 2026. Reference code: github.com/OmnAI-Lab/spilled-energy
+
+    Core idea
+    ---------
+    The final softmax classifier is read as an Energy-Based Model. Writing the
+    conditional ``p(x_i | x_{i-1:1})`` as a ratio of two EBMs yields two energies
+    that are computable directly from the raw logits ``theta``:
+
+    * logit energy     ``E^l_j = -theta_j[id(x_j)]``          (negative sampled-token logit)
+    * marginal energy  ``E^m_j = -logsumexp_k theta_j[k]``     (negative log-partition)
+
+    By the chain rule these should cancel between *adjacent* decoding steps. They
+    do not, and the residual is the spilled energy. Following the authors'
+    implementation, for generated token ``j``::
+
+        dE_j = Z_{j+1} - theta_j[id(x_j)]
+
+    where ``Z = logsumexp_k theta[k]``. (The paper's Eq. (8) writes this with the
+    opposite sign; the ``sign`` parameter below exists so the orientation is fixed
+    empirically rather than by trusting either source -- see ``sign``.)
+
+    Three score variants are supported, all training-free, logits-only and
+    computed from a single teacher-forced pass (see ``EnergyCalculator``):
+
+    * ``marginal``       -- the marginal energy ``E^m``
+    * ``spilled``        -- the spilled energy ``dE``
+    * ``scaled_spilled`` -- ``|E^m| * dE``
+
+    Scores are pooled across the answer span with ``min``, ``max`` or ``mean``.
+    """
+
+    def __init__(
+        self,
+        variant: str = "spilled",
+        pooling: str = "max",
+        sign: int = 1,
+    ):
+        """
+        Parameters:
+            variant (str): one of 'marginal', 'spilled', 'scaled_spilled'.
+            pooling (str): one of 'min', 'max', 'mean'; pooling across the span.
+            sign (int): +1 or -1, multiplied into the final score. The Estimator
+                contract requires **higher = more uncertain**; which orientation
+                satisfies that is an empirical question for each variant, so it is
+                an explicit parameter rather than a hard-coded guess.
+        """
+        if variant not in VARIANTS:
+            raise ValueError(f"variant must be one of {VARIANTS}, got {variant!r}")
+        if pooling not in POOLINGS:
+            raise ValueError(f"pooling must be one of {POOLINGS}, got {pooling!r}")
+        if sign not in (1, -1):
+            raise ValueError(f"sign must be +1 or -1, got {sign!r}")
+
+        super().__init__(["energy_token_logits", "energy_lse"], "sequence")
+        self.variant = variant
+        self.pooling = pooling
+        self.sign = sign
+
+    def __str__(self):
+        sign_tag = "" if self.sign == 1 else "_neg"
+        return f"SpilledEnergy_{self.variant}_{self.pooling}{sign_tag}"
+
+    def _per_token_scores(self, tok_logits: np.ndarray, lse: np.ndarray) -> np.ndarray:
+        """
+        Per-token score for one sample.
+
+        ``tok_logits`` has length N (raw logit of each sampled token) and ``lse``
+        has length N+1 (log-partition at each step plus the step after the last),
+        as produced by EnergyCalculator.
+        """
+        tok_logits = np.asarray(tok_logits, dtype=np.float64)
+        lse = np.asarray(lse, dtype=np.float64)
+        n = len(tok_logits)
+
+        if self.variant == "marginal":
+            # marginal energy at each generated token's own step
+            return -lse[:n]
+
+        # adjacent-step residual: Z_{j+1} - theta_j[id(x_j)]
+        delta = lse[1 : n + 1] - tok_logits
+
+        if self.variant == "spilled":
+            return delta
+
+        # scaled_spilled: |E^m| * dE, with E^m taken at the token's own step
+        return np.abs(-lse[:n]) * delta
+
+    def __call__(self, stats: Dict[str, np.ndarray]) -> np.ndarray:
+        """
+        Computes the Spilled Energy score for each sample.
+
+        Parameters:
+            stats (Dict[str, np.ndarray]): input statistics, which include:
+                * 'energy_token_logits': raw logits of the sampled tokens,
+                * 'energy_lse': per-step log-partitions (one longer).
+        Returns:
+            np.ndarray: uncertainty score per sample; higher = more uncertain.
+        """
+        all_tok_logits = stats["energy_token_logits"]
+        all_lse = stats["energy_lse"]
+
+        pool = {"min": np.min, "max": np.max, "mean": np.mean}[self.pooling]
+
+        out = []
+        for tok_logits, lse in zip(all_tok_logits, all_lse):
+            n = len(tok_logits)
+            if n == 0 or len(lse) < n + 1:
+                out.append(np.nan)
+                continue
+            scores = self._per_token_scores(tok_logits, lse)
+            scores = scores[np.isfinite(scores)]
+            out.append(np.nan if scores.size == 0 else float(pool(scores)))
+
+        return self.sign * np.array(out, dtype=np.float64)

@@ -1,0 +1,8 @@
+# Applied to both model output and gold target before the generation metrics
+# (via PreprocessOutputTarget). Path resolves relative to this config directory.
+process_output_fn:
+  path: triviaqa_normalization.py
+  fn_name: normalize_em_triviaqa
+process_target_fn:
+  path: triviaqa_normalization.py
+  fn_name: normalize_em_triviaqa
