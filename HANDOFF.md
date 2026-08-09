@@ -31,9 +31,8 @@ push URL is set to an invalid string on purpose.
 | AB | `eval_triviaqa_terminator_ab` | 150 | 4 | sdpa | terminator A/B |
 
 `REPORT.md` (experiments branch) answers the five assignment questions with every
-number verified against `runs/`. Two known wrong cross-references, both
-two-character fixes not yet applied: line 80 cites §5.1 where it means **§6.1**;
-line 162 cites §7.4 where it means **§8.3**.
+number verified against `runs/`. All cross-references resolve, and §9
+opens by explaining the two-branch split.
 
 ---
 
@@ -127,8 +126,8 @@ selects the noisiest token. Do not re-open this as a padding bug.
 
 ## 4. Open items
 
-1. **REPORT.md is committed** (`44dd0d2e`). Only the two cross-references above
-   remain.
+1. **REPORT.md is complete and committed.** Both wrong cross-references are
+   fixed and a scan finds no dangling ones; §9 documents the branch split.
 2. **Three upstream issue drafts, split, awaiting review before filing:**
    `harness/UPSTREAM_ISSUE_1_sanitizer.md` (lm-polygraph's bug — the one worth
    filing), `..._2_attention_fp16.md` (framed as *documentation*: the defect is
