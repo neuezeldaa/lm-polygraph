@@ -4,7 +4,7 @@
 **Author:** Roman Zolotov
 **Deliverables:** PR `spilled-energy` (implementation + tests), `spilled-energy-experiments` (harness, configs, notebook), this report.
 
-> Every number in this report is reproducible from the artifacts in `runs/`. Where a result depends on the run configuration, both configurations are given.
+> Every number in this report is reproducible from the artifacts in `runs/`. Where a result depends on the run configuration, both configurations are given. Normalized PRR values may differ from a fresh recomputation in the fourth decimal, since the normalization draws a random reference; rankings and confidence intervals are unaffected.
 
 ---
 
@@ -52,17 +52,20 @@ Write the next-token conditional as a ratio of two Boltzmann terms. From the sof
 
 so `E^l` is the negated logit of the sampled token and `E^m` is the negated log-partition over the vocabulary. Both come from the same logit vector, but they are read differently: `E^l` at a single index, `E^m` by marginalizing over the whole vocabulary.
 
-Applying the chain rule over a sequence, the total energy telescopes, and the terms that meet are `E^l` measured at step `i+1` against `E^m` measured at step `i`:
+Applying the chain rule over a sequence, the total energy telescopes and two terms from adjacent steps meet. These should cancel — they are the same quantity viewed from two neighbouring positions — and in a trained LLM they do not, because they are produced by different components at different decoding steps. That residual is the **spilled energy**, and the paper's claim is that its magnitude tracks factual error.
+
+**An index-convention discrepancy, worth stating because it inverts the sign.** Eq. (8) as printed pairs `E^l` at step `i+1` with `E^m` at step `i`. The authors' released code computes the opposite pairing, `delta = lse[j+1] − logit[j]`, which in the notation above is `E^l` at step `j` against `E^m` at step `j+1`:
 
 ```
-ΔE(x_{i:1}) = E^l(x_{i+1:1}) − E^m(x_{i:1})
+paper, Eq. (8):   ΔE = E^l(x_{i+1:1}) − E^m(x_{i:1})
+authors' code:    ΔE = E^l(x_{i:1})   − E^m(x_{i+1:1})     ← implemented here
 ```
 
-Theoretically these should cancel — they are the same quantity viewed from two adjacent steps. In a trained LLM they do not, because they are produced by different components at different decoding steps. That residual is the **spilled energy**. The paper's claim is that its magnitude tracks factual error.
+The two differ by a sign, and an inverted uncertainty score produces strongly negative PRR rather than a merely weak one — a failure mode that is easy to mistake for a broken implementation. I followed the code, and pinned the convention with a hand-computed unit test rather than deriving it from the paper.
 
-Three quantities are proposed as detectors: marginal energy `E^m`, spilled energy `ΔE`, and scaled spilled energy `ΔE_s = |E^m| · ΔE`. `E^l` alone is the classical "logit confidence" baseline. All are training-free and computable from a single forward pass.
+Three quantities are proposed as detectors: marginal energy `E^m`, spilled energy `ΔE`, and scaled spilled energy `ΔE_s = |E^m| · ΔE`. `E^l` alone is the classical "logit confidence" baseline. All are training-free and derived from the logits of a single forward pass — though recovering them inside lm-polygraph costs a second pass, for the reason below.
 
-**Why this needs a new StatCalculator rather than an estimator alone.** lm-polygraph's `GreedyProbsCalculator` applies `log_softmax` before storing, which makes `logsumexp(row) == 0` for every row by construction — the partition constant is destroyed and cannot be recovered. `E^m` is exactly that constant. The implementation therefore contributes `EnergyCalculator`, which performs a teacher-forced pass and reduces raw logits on the fly to `energy_token_logits` (length N) and `energy_lse` (length N+1); the extra entry is what makes the adjacent-step difference defined at the last token. A unit test asserts `|logsumexp| > 0`, which fails loudly if the calculator is ever re-wired to normalized log-probabilities.
+**Why this needs a new StatCalculator rather than an estimator alone.** `WhiteboxModel._ScoresProcessor` (`utils/model.py:455`) applies `log_softmax`, and `generate()` writes its output over `out.scores` (`utils/model.py:535`); `GreedyProbsCalculator` then stores what it is handed. The consequence is that `logsumexp(row) == 0` for every stored row by construction — the partition constant is destroyed before any calculator sees it, and cannot be recovered. `E^m` is exactly that constant. The implementation therefore contributes `EnergyCalculator`, which performs a teacher-forced pass and reduces raw logits on the fly to `energy_token_logits` (length N) and `energy_lse` (length N+1); the extra entry is what makes the adjacent-step difference defined at the last token. A unit test asserts `|logsumexp| > 0`, which fails loudly if the calculator is ever re-wired to normalized log-probabilities.
 
 ---
 
@@ -240,7 +243,7 @@ The paper's `[u, w]` span is obtained by prompting for a brief answer. On Trivia
 
 **7.1 Report a conditioning diagnostic alongside `ΔE`.** The cancellation ratio `|ΔE| / max(|E^l|, |E^m|)` is computable per sample at no cost. Where it is small, `ΔE` is a difference of nearly equal numbers and its value should be treated as unreliable rather than as low uncertainty. Used as a gate, this converts the dominant failure mode into an explicit abstention. The identity residual (§6.1) serves the same purpose at the level of a whole run, and is what revealed the 5.4× batching penalty.
 
-**7.2 Compute the energies in higher precision, and say so.** `E^m` is a log-partition over a 151 936-token vocabulary accumulated in fp16; the fp32 projection costs ~13 MB and removes the largest error source. A method whose central quantity requires this should state it as a requirement rather than leave it to the implementer.
+**7.2 Compute the energies in higher precision, and say which part.** `E^m` is a log-partition over a 151 936-token vocabulary. Projecting it in fp32 costs ~13 MB and is strictly more accurate, but measurement showed the `lm_head` accumulation is *not* the dominant error term (§6.1) — the divergence originates in the fp16 hidden states of the body. A method whose central quantity is a near-cancellation should state its precision requirements rather than leave them to the implementer, and should say which stage they apply to.
 
 **7.3 Compare against the right baselines.** The paper's comparison set is `p(true)` and trained probes. Against token entropy and self-certainty the advantage does not survive. A revision that includes these — and reports the rank correlation with them — would make a much stronger claim if it holds, and would be more useful if it doesn't.
 
@@ -256,11 +259,11 @@ Four issues surfaced during this work. They are reported as observations, not as
 
 **8.1 Non-finite logits are silently replaced by a uniform distribution.** `_SanitizeLogitsProcessor` rewrites a fully non-finite row to zeros. Downstream, `greedy_log_likelihoods` are then finite and constant at exactly `−ln V = −11.9312`, and the generation decodes as token id 0 repeated. A numerically unstable run therefore produces plausible-looking numbers instead of an error, and the failure is invisible in precisely the quantities a user would check. This is the mechanism behind the first failed run in this project (72 % of samples corrupted, accuracy exactly 0.000).
 
-**8.2 Three estimators are oriented opposite to their documentation.** `RenyiNeg`, `FisherRao` and `MeanConditionalPointwiseMutualInformation` score *higher* on confident inputs, while their docstrings state that higher values indicate more uncertainty. Verified two ways: they correlate with `SelfCertainty` at ρ ≈ −0.98 on real data, and on synthetic distributions with no data at all, `FisherRao` returns 0.7995 for a confident distribution and 0.0000 for a uniform one. They are reported as-shipped in §5.2; negated values are in the appendix. Either the sign or the documentation is wrong; which one is a question for the maintainers.
+**8.2 Three estimators are oriented opposite to their documentation.** `RenyiNeg`, `FisherRao` and `MeanConditionalPointwiseMutualInformation` score *higher* on confident inputs, while their docstrings state that higher values indicate more uncertainty. Evidence differs by estimator: the first two correlate with `SelfCertainty` at ρ = −0.983 and −0.983, and on synthetic distributions with no data at all `FisherRao` returns 0.7995 for a confident distribution and 0.0000 for a uniform one. `MeanConditionalPointwiseMutualInformation` correlates at only −0.621, but its normalized PRR moves from −0.7616 to +0.6401 under negation, which is the same diagnosis by a different route. All three are reported as-shipped in §5.2; negated values are in the appendix. Either the sign or the documentation is wrong; which one is a question for the maintainers.
 
 **8.3 fp16 + `eager` + `output_attentions=True` + left padding produces NaN.** Qwen2 attention computes `attn_weights + causal_mask` with `causal_mask = finfo(dtype).min`; in fp16, `−30 + (−65504)` overflows to `−inf` and softmax yields NaN. `transformers` guards this via `AttentionMaskConverter._unmask_unattended`, but the guard is gated on `sdpa` *and* `not output_attentions` — both violated by any attention-based UQ estimator. This is why §5.4 exists.
 
-**8.4 `PromptCalculator` is registered twice** at `register_default_stat_calculators.py:101`. Benign — the dictionary is keyed by stat name so the second registration overwrites the first idempotently — but it is dead code. Confirmed pre-existing via `git stash`.
+**8.4 `PromptCalculator` is registered twice** at `register_default_stat_calculators.py:102` and `:107`. Benign: the dictionary is keyed by stat name, so the second registration overwrites the first idempotently, and the calculator is constructed and run exactly once — verified empirically, not only by reading. It is dead code rather than duplicated computation. Confirmed pre-existing via `git stash`.
 
 ---
 
@@ -268,14 +271,21 @@ Four issues surfaced during this work. They are reported as observations, not as
 
 ```bash
 git clone --branch spilled-energy-experiments https://github.com/neuezeldaa/lm-polygraph
-# open harness/spilled_energy_colab_t4.ipynb in Colab, select a T4, Run all
+# open notebooks/spilled_energy_colab_t4.ipynb in Colab, select a T4, Run all
 ```
 
 The notebook is generated by `harness/make_notebook.py` and needs no manual editing. It gates on, in order: model provenance (hard assert on the resolved model path), degeneracy (no generation may be a single repeated token, nothing pinned at `−ln V`), exact-match accuracy in [0.1, 0.9], answer-span validation, cross-run comparability, and the energy identity against a floor calibrated at batch size 1.
 
 Gates are invoked through `harness/gate.py`, which runs each command as a subprocess and raises on a non-zero exit. This is deliberate and was not the original design: the first version called the gates with the notebook shell escape, which does not halt on failure, so every gate was advisory. One gate was additionally invoked with a stale argument name and had been failing silently. Both are fixed, and the halting behaviour is verified against real data — the energy identity gate passes on the batch-size-1 run and stops the notebook on the batched ones.
 
-Unit tests: `pytest test/` — CPU only, ~13 s, no GPU required.
+Unit tests added by this work — CPU only, ~15–30 s, no GPU and no model download:
+
+```bash
+pytest test/test_spilled_energy.py test/test_generation_trimming.py \
+       test/test_batch_invariance.py test/test_energy_batch_invariance.py
+```
+
+(The full `pytest test/` also collects upstream tests, which download `bloomz-560m`.)
 
 ---
 
