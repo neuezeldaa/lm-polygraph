@@ -77,7 +77,7 @@ Three differences make this a partial reproduction by construction, all forced b
 
 - **Metric.** The paper reports AUROC. The assignment requires normalized PRR at 0.5. These rank estimators differently in general.
 - **Model.** The paper uses LLaMA-3-8B-Instruct, LLaMA, Mistral-Instruct and Qwen-3-8B. A T4 at fp16 admits ~3B parameters.
-- **Precision.** §5.1 shows this is not a detail for this particular method.
+- **Precision.** §6.1 shows this is not a detail for this particular method.
 
 With those caveats, the *ordering within the method's own variants* should still transfer, and it does not. On TriviaQA with LLaMA-Instruct the paper reports:
 
@@ -159,7 +159,7 @@ The first three rows are the load-bearing ones. `E^l` and `E^m` are the two quan
 
 ### 5.4 Attention-based baselines
 
-`RAUQ`, `AttentionScore` and `CSL` require attention weights, which forces `output_attentions=True`, which in turn disables a guard in `transformers` that is needed under fp16 (§7.4). They were therefore run at batch size 1 with the `eager` implementation, at n = 300:
+`RAUQ`, `AttentionScore` and `CSL` require attention weights, which forces `output_attentions=True`, which in turn disables a guard in `transformers` that is needed under fp16 (§8.3). They were therefore run at batch size 1 with the `eager` implementation, at n = 300:
 
 | Estimator | nPRR@0.5 | 95 % CI |
 |---|---:|---|
@@ -268,6 +268,19 @@ Four issues surfaced during this work. They are reported as observations, not as
 ---
 
 ## 9. Reproducing this
+
+**The deliverable is split across two branches, deliberately.** `spilled-energy`
+is the PR: the `EnergyCalculator`, the `SpilledEnergy` estimator, their tests, and
+the configs needed to run them — self-contained, and the only upstream edits are
+four single-line registrations. `spilled-energy-experiments` adds the harness, the
+notebook, and this report.
+
+The split is not cosmetic. The ablation ladder (run B) and the terminator A/B load
+estimators by the dotted path `harness.pooled_baseline`, and `harness/` has no
+place in a library PR — shipping those configs in the PR would give a maintainer an
+`ImportError` on first use. They therefore live on the experiments branch together
+with the module they need. **Run B and the terminator A/B are reproduced from the
+experiments branch, not from the PR**; runs A and C reproduce from either.
 
 ```bash
 git clone --branch spilled-energy-experiments https://github.com/neuezeldaa/lm-polygraph

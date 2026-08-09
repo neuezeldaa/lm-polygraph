@@ -137,6 +137,14 @@ selects the noisiest token. Do not re-open this as a padding bug.
    the intended convention is theirs to state).
 3. **The PR is deliberately unopened** and stays that way until Roman says
    otherwise.
+4. **When the PR description is written, it must state the branch split and the
+   reason.** The PR is self-contained for the method and its tests; the ablation
+   ladder, the terminator A/B and `harness/` live on
+   `spilled-energy-experiments` because they load estimators by the dotted path
+   `harness.pooled_baseline`, which has no place in a library PR. Said plainly,
+   deliberate separation reads very differently from an oversight — and a
+   reviewer who notices run B is absent will otherwise assume the latter.
+   REPORT.md §9 carries the same note for readers of the report alone.
 
 ### A note on what the PR branch may contain
 
