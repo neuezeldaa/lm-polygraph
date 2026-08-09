@@ -13,7 +13,7 @@ here. This document is those.
 | | |
 |---|---|
 | Base | `upstream/main` = `efea882d810d07770e71d3a80e02416d09751435` |
-| PR branch | `spilled-energy` = `52845ebd` — 25 files, **+2216, 0 deletions** |
+| PR branch | `spilled-energy` = `d39a04ff` — 21 files, **+1998, 0 deletions** |
 | Experiments branch | `spilled-energy-experiments` = `44dd0d2e` |
 | Remotes | `origin` = `neuezeldaa/lm-polygraph` (fork, public) · `upstream` = `IINemo/lm-polygraph`, **push disabled** |
 
@@ -137,6 +137,15 @@ selects the noisiest token. Do not re-open this as a padding bug.
    the intended convention is theirs to state).
 3. **The PR is deliberately unopened** and stays that way until Roman says
    otherwise.
+
+### A note on what the PR branch may contain
+
+`ablation_ladder.yaml` and `terminator_ab.yaml` were removed from the PR branch:
+they load estimators by the dotted path `harness.pooled_baseline`, and `harness/`
+exists only on the experiments branch, so a maintainer running them from the PR
+would hit an `ImportError`. Anything added to `configs/` on the PR branch must be
+self-contained -- check with `grep -rn "name: harness\." configs/` before
+committing there.
 
 ---
 
