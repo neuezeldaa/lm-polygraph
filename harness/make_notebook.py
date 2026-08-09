@@ -311,8 +311,8 @@ code(
     "       f\" --save-dir '{DRIVE}/dev_n150'\"\n"
     "       ' --samples 150 --n-boot 0'\n"
     f"       ' --expect-model {MODEL}')\n"
-    "print(cmd)\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd)"
 )
 
 # 12 --------------------------------------------------------------------------
@@ -331,7 +331,8 @@ code(
     "       f\" --save-dir '{DRIVE}/dev_n150'\"\n"
     f"       ' --config {CFG_BASE}'\n"
     "       ' --max-new-tokens 20')\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd)"
 )
 
 # 13 --------------------------------------------------------------------------
@@ -345,7 +346,8 @@ code(
     "cmd = ('python harness/estimate_runtime.py'\n"
     "       f\" --from '{DRIVE}/dev_n150'\"\n"
     "       ' --label baselines_n1000 --to-n 1000')\n"
-    "!{cmd}\n"
+    "from harness.gate import gate\n"
+    "gate(cmd, required=False)\n"
     "print('\\nNOTE: the ladder run has fewer estimators but the same generation cost,')\n"
     "print('so budget roughly the same again for run B.')"
 )
@@ -372,8 +374,8 @@ code(
     "       f\" --save-dir '{DRIVE}/AB_terminator_n150'\"\n"
     "       ' --n-boot 0'\n"
     f"       ' --expect-model {MODEL}')\n"
-    "print(cmd)\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd, required=False)"
 )
 
 md(
@@ -392,7 +394,8 @@ code(
     "cmd = ('python harness/terminator_ab_report.py'\n"
     "       f\" --npz '{DRIVE}/AB_terminator_n150/per_sample_seed1.npz'\"\n"
     "       f\" --out '{DRIVE}/AB_terminator_n150/terminator_ab.md'\")\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd, required=False)"
 )
 
 # 16 --------------------------------------------------------------------------
@@ -412,8 +415,8 @@ code(
     "       f\" --save-dir '{DRIVE}/A_baselines_n1000'\"\n"
     "       ' --n-boot 1000'\n"
     f"       ' --expect-model {MODEL}')\n"
-    "print(cmd)\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd)"
 )
 
 # 15 --------------------------------------------------------------------------
@@ -431,8 +434,8 @@ code(
     "       f\" --save-dir '{DRIVE}/B_ladder_n1000'\"\n"
     "       ' --n-boot 1000'\n"
     f"       ' --expect-model {MODEL}')\n"
-    "print(cmd)\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd)"
 )
 
 # 16 --------------------------------------------------------------------------
@@ -453,7 +456,8 @@ code(
     "       f\" --a '{DRIVE}/A_baselines_n1000'\"\n"
     "       f\" --b '{DRIVE}/B_ladder_n1000'\"\n"
     "       ' --label-a baselines --label-b ladder')\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd)"
 )
 
 # 17 --------------------------------------------------------------------------
@@ -475,8 +479,8 @@ code(
     "       f\" --save-dir '{DRIVE}/C_attention_bs1_n300'\"\n"
     "       ' --n-boot 1000'\n"
     f"       ' --expect-model {MODEL}')\n"
-    "print(cmd)\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd)"
 )
 
 # 18 --------------------------------------------------------------------------
@@ -506,7 +510,8 @@ code(
     "       f\" --b '{DRIVE}/C_attention_bs1_n300'\"\n"
     "       ' --label-a bs4_sdpa --label-b bs1_eager'\n"
     "       ' --allow-prefix --max-mismatch-frac 0.02')\n"
-    "!{cmd}"
+    "from harness.gate import gate\n"
+    "gate(cmd)"
 )
 
 # 19 --------------------------------------------------------------------------
@@ -529,9 +534,11 @@ md(
 code(
     "for tag in ['A_baselines_n1000', 'B_ladder_n1000']:\n"
     "    cmd = ('python harness/check_energy_identity.py'\n"
-    "           f\" --npz '{DRIVE}/{tag}/per_sample_seed1.npz'\")\n"
+    "           f\" --run '{DRIVE}/{tag}'\"\n"
+    "           f\" --floor-run '{DRIVE}/C_attention_bs1_n300'\")\n"
     "    print('=' * 70); print(tag); print('=' * 70)\n"
-    "    !{cmd}"
+    "    from harness.gate import gate\n"
+    "    gate(cmd)"
 )
 
 # 22 --------------------------------------------------------------------------
@@ -556,7 +563,8 @@ code(
     "           f\" --out-md '{DRIVE}/{tag}/correlations.md'\"\n"
     "           f\" --out-csv '{DRIVE}/{tag}/correlations.csv'\")\n"
     "    print('=' * 70); print(tag); print('=' * 70)\n"
-    "    !{cmd}"
+    "    from harness.gate import gate\n"
+    "    gate(cmd, required=False)"
 )
 
 # 22 --------------------------------------------------------------------------

@@ -61,15 +61,27 @@ class EnergyCalculator(StatCalculator):
             fp32_projection (bool): recompute the final vocabulary projection in
                 float32 for the handful of rows actually used.
 
-                This matters because ``dE = Z_{j+1} - theta_j`` is a difference of
-                two large, similar quantities. Measured on Qwen2.5-3B/TriviaQA:
+                Context: ``dE = Z_{j+1} - theta_j`` is a difference of two large,
+                similar quantities. Measured on Qwen2.5-3B/TriviaQA:
                 ``|theta| ~ 22.7``, ``|Z| ~ 27.1``, ``|dE| ~ 4.2`` -- a 6.5x
-                amplification, so any error in the logits is magnified 6.5x in dE,
-                and ``max`` pooling then selects the noisiest token. The lm_head
-                projection is a 2048-term dot product per vocabulary entry
-                accumulated in fp16, which is the largest single source of that
-                error. Only ``n_gen + 1`` rows are needed, so redoing just those in
-                float32 costs ~13 MB and removes the dominant term.
+                amplification, so any logit error is magnified 6.5x in dE, and
+                ``max`` pooling then selects the noisiest token.
+
+                MEASURED EFFECT: essentially none. This was introduced on the
+                hypothesis that the fp16 lm_head accumulation (a 2048-term dot
+                product per vocabulary entry) was the dominant error source. It is
+                not. Re-running with it on left the energies unchanged to ~0.002
+                mean / 0.02 max, and the cross-pass residual was identical
+                (0.18947 vs 0.1895 before). The divergence therefore lives in the
+                fp16 hidden states produced by the transformer body, which this
+                cannot touch -- fixing it would require running the body itself in
+                higher precision, which does not fit a 16 GB T4 for a 3B model.
+
+                Kept on because it is strictly more accurate and costs ~13 MB, and
+                because it makes the negative result above explicit rather than
+                leaving the question open. What DOES move the residual is batch
+                size: 0.0368 at batch_size=1 versus 0.1993 at batch_size=4, a 5.4x
+                difference on identical generations.
             vocab_chunk (int): vocabulary chunk size for the fp32 projection, to
                 avoid materialising a float32 copy of the whole lm_head weight
                 (1.2 GB for a 152k vocabulary).
