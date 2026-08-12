@@ -3,15 +3,16 @@
 Assignment: implement *Spilled Energy* (ICLR 2026) as an lm-polygraph estimator
 and compare against baselines on **normalized PRR@0.5**.
 
-**Read `lm-polygraph/HANDOFF.md` first.** It carries the decisions, the reasons
-behind them, and the traps already paid for. This file is conventions only.
+**Read `HANDOFF.md` first** (repository root). It carries the decisions, the
+reasons behind them, and the traps already paid for. This file is conventions
+only, and it is the authoritative copy — `../CLAUDE.md` is only a pointer here.
 
 **The empirical work is closed.** Runs A, B, C and the terminator A/B are final;
 no re-runs are needed or wanted.
 
 ## Branches
 - **`spilled-energy`** — PR candidate. StatCalculator, Estimator, tests, configs.
-  Nothing from `harness/` or `notebooks/`. Currently +2216 / −0 over
+  Nothing from `harness/` or `notebooks/`. Currently 21 files, +1819 / −0 over
   `upstream/main` (`efea882d`).
 - **`spilled-energy-experiments`** — the above **plus** `harness/`, `notebooks/`,
   `REPORT.md`, `HANDOFF.md`. This is what Colab clones.

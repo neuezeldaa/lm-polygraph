@@ -101,9 +101,13 @@ Not mutually exclusive; (1) alone would have surfaced this immediately.
 
 ### Environment
 
+The reproduction above needs none of this — it is CPU-only and runs anywhere. The
+following is the environment in which the **observed impact** was measured: a free
+Google Colab T4 instance.
+
 * lm-polygraph `efea882d810d07770e71d3a80e02416d09751435`
 * transformers 4.50.0, torch 2.6.0+cu124
-* Qwen/Qwen2.5-3B-Instruct, fp16, Tesla T4
+* Qwen/Qwen2.5-3B-Instruct, fp16, Tesla T4 (Google Colab)
 
 ### Note
 

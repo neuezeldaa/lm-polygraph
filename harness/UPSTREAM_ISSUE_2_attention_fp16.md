@@ -52,17 +52,29 @@ An attention-based estimator violates **both** the first and the last condition.
 
 ### Reproduction — no model needed
 
+This mirrors `modeling_qwen2.py:123` and `:125` exactly, including the float32
+upcast in the softmax:
+
 ```python
 import torch
+import torch.nn as nn
+
 for dtype in (torch.float16, torch.float32):
-    scores = torch.full((1, 8), -30.0, dtype=dtype)
-    mask   = torch.full((1, 8), torch.finfo(dtype).min, dtype=dtype)
-    s = scores + mask
-    print(dtype, "inf:", bool(torch.isinf(s).any()),
-          "nan after softmax:", bool(torch.isnan(torch.softmax(s, -1)).any()))
-# torch.float16 inf: True  nan after softmax: True
-# torch.float32 inf: False nan after softmax: False
+    attn_weights = torch.full((1, 1, 1, 8), -30.0, dtype=dtype)
+    causal_mask  = torch.full((1, 1, 1, 8), torch.finfo(dtype).min, dtype=dtype)
+    attn_weights = attn_weights + causal_mask                                  # :123
+    probs = nn.functional.softmax(attn_weights, dim=-1,
+                                  dtype=torch.float32).to(dtype)               # :125
+    print(dtype, "row all -inf:", bool(torch.isinf(attn_weights).all()),
+          " nan after softmax:", bool(torch.isnan(probs).any()))
+# torch.float16 row all -inf: True  nan after softmax: True
+# torch.float32 row all -inf: False nan after softmax: False
 ```
+
+**The `dtype=torch.float32` upcast does not rescue this.** The overflow happens in
+the addition on the previous line, while still in fp16; by the time the upcast
+runs the row is already uniformly `-inf`, and a softmax over an all-`-inf` row is
+`NaN` in any precision.
 
 Observed at scale on Qwen2.5-3B-Instruct, fp16, T4, `batch_size=4`, left padding:
 **108 of 150** generations collapsed to token id `0`. Only the longest sequence
@@ -88,7 +100,11 @@ combination is silently wrong rather than slow.
 
 ### Environment
 
+The reproduction above needs none of this — it is CPU-only and runs anywhere. The
+following is the environment in which the **at-scale corruption** was observed: a
+free Google Colab T4 instance.
+
 * lm-polygraph `efea882d810d07770e71d3a80e02416d09751435`
 * transformers 4.50.0, torch 2.6.0+cu124
-* Qwen/Qwen2.5-3B-Instruct, fp16, Tesla T4 (Turing: no hardware bf16, so fp16 is
-  the only half-precision option)
+* Qwen/Qwen2.5-3B-Instruct, fp16, Tesla T4 (Google Colab; Turing, so no hardware
+  bf16 — fp16 is the only half-precision option)
