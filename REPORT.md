@@ -16,9 +16,9 @@ I implemented the method end-to-end in lm-polygraph and evaluated it on TriviaQA
 
 1. **The method's strongest components do not outperform the baselines they are compared against.** Best energy variant `SpilledEnergy_logit_max_noterm` reaches normalized PRR@0.5 of **0.845 [0.779, 0.903]**; `MeanTokenEntropy` reaches **0.900 [0.847, 0.946]**. The confidence intervals overlap almost entirely.
 2. **`E^l` and `E^m` are not distinguishable from each other**, correlating at Spearman ρ = 0.987–0.999 under matched pooling, and `E^m` is not distinguishable from `SelfCertainty` (ρ = 0.985). The two energies whose difference defines the method measure, on this data, the same thing.
-3. **`ΔE` is numerically ill-conditioned in fp16 by construction, and it underperforms the energies it is built from.** It subtracts two quantities of magnitude ≈ 25 to obtain one of magnitude ≈ 4. Reproducibility across run configurations degrades monotonically with how much cancellation and selection a quantity involves, and at the extreme (`ΔE` under `max` pooling) two runs over *identical generations* disagree by more than the spread of the quantity itself. The underperformance survives in the cleanest configuration available, so it is a property of the method and not only of the arithmetic.
+3. **`ΔE` underperforms the energies it is built from, and it is ill-conditioned by construction.** It subtracts two quantities of magnitude ≈ 25 to obtain one of magnitude ≈ 4, amplifying any per-logit error ≈ 6.5×. An earlier version of this report attributed a large cross-run disagreement to that amplification under fp16. That attribution was wrong, and §6.1 now records what it actually was: a pad token entering the pooling window at batch size > 1. On identical token windows the two runs agree at ρ = 1.000. The underperformance of `ΔE` is unaffected — it is measured in the pad-free window and holds there.
 
-A secondary result concerns methodology rather than the method: **the definition of the pooling window changes which estimator wins.** Including two service tokens (newline + EOS) in the window moves pooled mean log-likelihood from −0.100 to **0.803** normalized PRR. Any comparison that does not fix this is not measuring what it claims to.
+A secondary result concerns methodology rather than the method: **the definition of the pooling window changes which estimator wins.** Including the service tokens (newline + EOS, and at batch size > 1 a generate-appended pad) in the window moves pooled mean log-likelihood from −0.100 to **0.803** normalized PRR. Any comparison that does not fix the window is not measuring what it claims to — and in the library as shipped the window is not even batch-invariant (§6.1, §8.4).
 
 ---
 
@@ -77,7 +77,7 @@ Three differences make this a partial reproduction by construction, all forced b
 
 - **Metric.** The paper reports AUROC. The assignment requires normalized PRR at 0.5. These rank estimators differently in general.
 - **Model.** The paper uses LLaMA-3-8B-Instruct, LLaMA, Mistral-Instruct and Qwen-3-8B. A T4 at fp16 admits ~3B parameters.
-- **Precision.** §6.1 shows this is not a detail for this particular method.
+- **Precision.** §6.1 quantifies it: the measured fp16 error is 0.039 nats per token, small enough not to affect the ranking, but the 6.5× amplification built into `ΔE` makes precision a stated requirement of the method rather than an implementation detail.
 
 With those caveats, the *ordering within the method's own variants* should still transfer, and it does not. On TriviaQA with LLaMA-Instruct the paper reports:
 
@@ -155,7 +155,7 @@ Pooled log-likelihood and pooled entropy required a new `PooledBaseline` control
 | `marginal_mean` | `SelfCertainty` | 0.985 |
 | `marginal_mean` | `MeanTokenEntropy` | 0.902 |
 
-The first three rows are the load-bearing ones. `E^l` and `E^m` are the two quantities whose difference the entire derivation rests on, and under matched pooling they are one measurement — at ρ = 0.999 the difference between them is essentially all that survives, and §6.1 argues that what survives is largely numerical. `ΔE` *is* a distinct signal (ρ = 0.112 against `marginal_mean`, 0.608 in the no-terminator window) — it is simply a worse one.
+The first three rows are the load-bearing ones. `E^l` and `E^m` are the two quantities whose difference the entire derivation rests on, and under matched pooling they are one measurement — at ρ = 0.999 the difference between them is essentially all that survives, and §6.1 bounds how much of that difference could be numerical noise (0.039 nats per token). `ΔE` *is* a distinct signal (ρ = 0.112 against `marginal_mean`, 0.608 in the no-terminator window) — it is simply a worse one.
 
 ### 5.4 Attention-based baselines
 
@@ -178,30 +178,55 @@ The headline here is that two attention-based estimators — one forward pass, n
 
 ### 5.5 Run comparability
 
-PRR is only comparable across tables if the generations are identical. Runs A and B are byte-identical by SHA-256 over `greedy_texts` and `greedy_tokens`. Run C shares generations with A on 298/300 samples (0.67 %), within the 2 % tolerance set for it; the two differences are expected `sdpa`-versus-`eager` rounding on near-tied argmax, which is why that gate is a tolerance and not an equality.
+PRR is only comparable across tables if the generations are identical. Runs A and B are byte-identical by SHA-256 over `greedy_texts` and `greedy_tokens`. Run C shares *texts* with A on 298/300 samples (0.67 % differing), within the 2 % tolerance set for it; the two differences are expected `sdpa`-versus-`eager` rounding on near-tied argmax, which is why that gate is a tolerance and not an equality.
+
+The *token windows*, however, match on only 100/300: in 198 samples run A carries one extra generate-appended pad that run C does not (§6.1). The comparability gate compares decoded texts, so it did not see this. Scores pooled over the untrimmed window are therefore **not** comparable between A and C; scores in the primary no-terminator window are, and were verified to be — ρ ≥ 0.9999 on exactly the affected samples.
 
 ---
 
 ## 6. Q4 — Limitations and failure modes
 
-### 6.1 `ΔE` is ill-conditioned in fp16 — the dominant failure mode
+### 6.1 The pooling window is not batch-invariant — the dominant measurement artefact
 
-Measured on run A: median `|θ[id]|` = 22.72, median `|Z|` = 27.09, median `|ΔE|` = 4.19. The definition subtracts two quantities of magnitude ≈ 25 to produce one of magnitude ≈ 4, so **any logit error is amplified ≈ 6.5×**, and `max` pooling then selects the noisiest token in the window.
+`ΔE` is arithmetically ill-conditioned by construction. Measured on run A: median `|θ[id]|` = 22.72, median `|Z|` = 27.09, median `|ΔE|` = 4.19. The definition subtracts two quantities of magnitude ≈ 25 to produce one of magnitude ≈ 4, so **any per-logit error is amplified ≈ 6.5×**, and `max` pooling then selects the most error-prone token in the window. That is a property of the formula, and it is why the diagnostics below exist.
 
-The consequence is measurable as a dose–response relationship. Comparing the same estimators over the same 300 samples with *identical generations*, in two runs differing only in batch size and attention kernel:
+It is **not**, however, what produced the cross-run disagreement that an earlier version of this section reported as an fp16 conditioning effect. The cause is a padding artefact in the trimmed window, and locating it changes the conclusion. The correction is recorded here rather than quietly applied.
 
-| Quantity | cancellation | selection | ρ(bs=4, bs=1) | std of disagreement |
-|---|---|---|---:|---:|
-| `marginal_mean` | none | none | 0.956 | 0.95 |
-| `logit_mean` | none | none | 0.820 | 2.11 |
-| `spilled_mean` | yes | none | 0.736 | 1.16 |
-| `spilled_max` | yes | yes | **0.293** | **3.32** |
+**What happens.** `GreedyProbsCalculator` trims a generation at the first EOS *inclusive* (`length = j + 1`). At batch size > 1 a sequence that stops early is padded by `generate` out to the length of the longest sequence in the batch. This configuration points `eos_token_id` at `<|endoftext|>` (a loader choice, documented in `examples/configs/model/load_qwen_fp16.py`, without which continuation-style generations are not trimmed at all), and that id is also `pad_token_id`, so the first generate-appended pad *is* the first EOS the trim finds, and it stays inside the window. At batch size 1 nothing is padded and it never appears. The two runs are therefore not scoring the same token windows:
 
-Agreement degrades monotonically with how much subtraction and how much extremum selection a quantity involves. For `spilled_max` the spread of the disagreement (3.32) exceeds the spread of the quantity itself (3.17 and 2.67 in the two runs), and there is a systematic +3.06 offset with the batched run higher in 81.3 % of samples — consistent with `max` pooling under noise, where the noisier pass selects a higher maximum. At that point the estimator partly reports *how noisy the forward pass was* rather than how uncertain the model was.
+| run A (bs = 4) vs run C (bs = 1), same 300 samples | |
+|---|---:|
+| `greedy_texts` identical | 298/300 |
+| `greedy_tokens` identical | 100/300 |
+| A = C plus exactly one trailing pad | 198/300 |
 
-The same effect is visible directly in the energy statistics. The cross-pass residual of the identity `log p = E^m − E^l` is **0.0368** at batch size 1 and **0.1993** at batch size 4 — **5.4× worse under batching**, on identical generations. The within-pass identity `tok − lse` passes at both batch sizes, so the energies are structurally correct: what differs is precision, not correctness.
+Splitting the disagreement by that grouping separates the artefact from everything else:
 
-**Does the weakness survive better conditioning?** Recomputing both configurations on the same 300 samples with one formula:
+| Quantity | group | n | ρ(A, C) | mean(A − C) |
+|---|---|---:|---:|---:|
+| `marginal_mean` | extra pad in A | 198 | 0.981 | −1.50 |
+| | tokens identical | 100 | **1.000** | −0.00 |
+| `logit_mean` | extra pad in A | 198 | 0.953 | +4.05 |
+| | tokens identical | 100 | **1.000** | −0.00 |
+| `spilled_mean` | extra pad in A | 198 | 0.883 | +2.13 |
+| | tokens identical | 100 | **1.000** | +0.00 |
+| `spilled_max` | extra pad in A | 198 | **0.315** | +4.61 |
+| | tokens identical | 100 | **1.000** | +0.00 |
+
+On identical windows the two runs agree at ρ = 1.000 with a disagreement spread of 0.01–0.03 — and these runs differ in batch size *and* in attention kernel (`sdpa` vs `eager`). There is no measurable fp16 batch-size effect. The monotone "dose–response" pattern I previously read as cancellation sensitivity was the pad, ordered by how strongly each pooling reacts to one extreme token.
+
+The identity residual says the same once it is split by token type:
+
+| mean \|(E^m − E^l) − log p\| | real tokens | pad tokens | overall |
+|---|---:|---:|---:|
+| run A (bs = 4, `sdpa`) | 0.0393 (n = 4086) | 1.1932 (n = 658) | 0.1993 |
+| run C (bs = 1, `eager`) | 0.0368 (n = 1183) | — | 0.0368 |
+
+The "5.4× worse under batching" figure was 0.1993 / 0.0368. Restricted to tokens the model actually generated it is 0.0393 / 0.0368 = **1.07×**, i.e. nothing. Pad rows carry a median `log p` of −21.95 — the model assigns essentially zero probability to a token it never chose — and 658 of them are enough to move the pooled mean by a factor of five.
+
+**Do the primary results survive? Yes, and it is checked, not argued.** The primary configuration excludes trailing terminators from the pooling window, and `_count_trailing_terminators` treats pad as a terminator, so the pad is dropped before pooling. Recomputing all twelve `_noterm` variants from both runs' stored statistics **on exactly the 198 samples whose windows differ by the pad** gives ρ ≥ 0.9999 for every variant, with mean(A − C) ≤ 0.003 for the nine unscaled variants and ≤ 0.065 for the three `scaled_spilled` ones (which multiply by `|E^m|` ≈ 27). §5.2 and §5.3 stand as reported.
+
+**What is contaminated** is every score pooled over the untrimmed window at batch size > 1 — the terminator-included anchors here, and equally the baselines. The comparison below therefore measures how each pooling reacts to the pad, not precision:
 
 | Quantity | bs = 4 | bs = 1 | Δ |
 |---|---:|---:|---:|
@@ -210,11 +235,13 @@ The same effect is visible directly in the energy statistics. The cross-pass res
 | `spilled_mean` | 0.191 | 0.506 | **+0.315** |
 | `spilled_max` | 0.258 | 0.214 | −0.045 |
 
-`ΔE` is substantially *understated* by the batched run — `spilled_mean` nearly triples at batch size 1 — but even in the cleanest configuration available it reaches 0.506 against 0.730 for the two energies it is derived from. **The underperformance is real; the batched measurement additionally penalises it.** Both halves matter: the first is the finding, the second is a warning that any single reported number for `ΔE` is configuration-dependent to a degree the paper does not discuss.
+`spilled_mean` nearly triples at batch size 1 because the pad — whose `ΔE` is large, and which the mean averages in — is gone. Read correctly, this table is a statement about window hygiene, not about fp16.
 
-**A mitigation that did not work, recorded as such.** `fp32_projection` recomputes the vocabulary projection in float32 for the few rows needed (~13 MB), on the hypothesis that fp16 accumulation in the `lm_head` was the dominant error term. It is not: with it enabled the energies moved by 0.002 on average and the residual was unchanged (0.18947 vs 0.1895 pooled). The divergence originates in the fp16 hidden states of the transformer body, which the projection cannot reach and which cannot be raised to fp32 for a 3B model on a 16 GB T4. The option remains enabled because it is strictly more accurate at negligible cost, but it is reported as a measured negative result.
+**The underperformance of `ΔE` is unaffected by all of this.** It is measured in the `_noterm` window (§5.2, §5.3), which is pad-free in both runs: `spilled_*_noterm` reaches 0.11–0.51 against 0.75–0.85 for the two energies it is derived from.
 
-This is a property of the method under the assignment's fp16 constraint, not of this implementation.
+**A mitigation that did not work, recorded as such.** `fp32_projection` recomputes the vocabulary projection in float32 for the few rows needed (~13 MB), on the hypothesis that fp16 accumulation in the `lm_head` was the dominant error term. With it enabled the energies moved by 0.002 on average and the pooled residual was unchanged (0.18947 vs 0.1895). That is now explained: the residual it was aimed at was dominated by pad rows, which no amount of precision can repair, while on real tokens the fp16 error was already only 0.039 nats. The option is harmless and strictly more accurate, but it was addressing a problem that did not exist — and in the reworked implementation (which reads the generation's own logits instead of re-running the model) it disappears entirely.
+
+**Where this leaves fp16.** The 6.5× amplification is real arithmetic and remains a risk for this method in half precision. But on this model and dataset the measured fp16 error — 0.039 nats on real tokens, ρ = 1.000 across two different attention kernels — is far too small to explain the method's ranking. The dominant failure mode found in this project is the definition of the pooling window (§6.2), not precision.
 
 ### 6.2 The window definition dominates the comparison
 
@@ -227,7 +254,9 @@ The pooling window is not neutral. With a median generation length of 4 tokens, 
 | `SpilledEnergy_marginal_mean` | 0.8410 | 0.7672 | −0.074 |
 | `SpilledEnergy_spilled_max` | 0.5290 | 0.1143 | −0.415 |
 
-Two service tokens move a baseline by almost a full unit of normalized PRR, and they move it in the *opposite* direction to the energy variants. I adopted the excluded-terminator window as primary because the terminator is not part of the answer and the paper's construct is defined on the answer span — noting that this choice costs the method 0.074 and rescues the baseline by 0.904, i.e. it is the window that disfavours my own implementation.
+Two service tokens move a baseline by almost a full unit of normalized PRR, and they move it in the *opposite* direction to the energy variants.
+
+One caveat on the left-hand column: this run used batch size 4, so in roughly two thirds of samples the terminator-included window also carries a generate-appended pad (§6.1). That column therefore mixes the newline, the EOS and an artefact, and its individual values should not be quoted as the cost of including a terminator. The qualitative point is unaffected and if anything understated — the window definition moves the ranking by more than the methods differ from each other — and the excluded-terminator column, which is the primary one, is pad-free. I adopted the excluded-terminator window as primary because the terminator is not part of the answer and the paper's construct is defined on the answer span — noting that this choice costs the method 0.074 and rescues the baseline by 0.904, i.e. it is the window that disfavours my own implementation.
 
 ### 6.3 Redundancy with existing estimators
 
@@ -241,9 +270,9 @@ The paper's `[u, w]` span is obtained by prompting for a brief answer. On Trivia
 
 ## 7. Q5 — How could the method be improved?
 
-**7.1 Report a conditioning diagnostic alongside `ΔE`.** The cancellation ratio `|ΔE| / max(|E^l|, |E^m|)` is computable per sample at no cost. Where it is small, `ΔE` is a difference of nearly equal numbers and its value should be treated as unreliable rather than as low uncertainty. Used as a gate, this converts the dominant failure mode into an explicit abstention. The identity residual (§6.1) serves the same purpose at the level of a whole run, and is what revealed the 5.4× batching penalty.
+**7.1 Report a conditioning diagnostic alongside `ΔE`.** The cancellation ratio `|ΔE| / max(|E^l|, |E^m|)` is computable per sample at no cost. Where it is small, `ΔE` is a difference of nearly equal numbers and its value should be treated as unreliable rather than as low uncertainty. Used as a gate, this converts a known ill-conditioning into an explicit abstention. The identity residual (§6.1) serves the same purpose at the level of a whole run: split by token type it localised the padding artefact immediately, where the pooled figure alone had suggested a precision problem.
 
-**7.2 Compute the energies in higher precision, and say which part.** `E^m` is a log-partition over a 151 936-token vocabulary. Projecting it in fp32 costs ~13 MB and is strictly more accurate, but measurement showed the `lm_head` accumulation is *not* the dominant error term (§6.1) — the divergence originates in the fp16 hidden states of the body. A method whose central quantity is a near-cancellation should state its precision requirements rather than leave them to the implementer, and should say which stage they apply to.
+**7.2 Compute the energies in higher precision, and say which part.** `E^m` is a log-partition over a 151 936-token vocabulary. Projecting it in fp32 costs ~13 MB and is strictly more accurate, but it changed nothing measurable (§6.1): the residual it was aimed at came from pad rows rather than from `lm_head` accumulation, and the genuine fp16 error on real tokens is 0.039 nats. A method whose central quantity is a near-cancellation should still state its precision requirements rather than leave them to the implementer — but it should state them against a measured error budget, which is what the identity residual provides.
 
 **7.3 Compare against the right baselines.** The paper's comparison set is `p(true)` and trained probes. Against token entropy and self-certainty the advantage does not survive. A revision that includes these — and reports the rank correlation with them — would make a much stronger claim if it holds, and would be more useful if it doesn't.
 
@@ -255,7 +284,7 @@ The paper's `[u, w]` span is obtained by prompting for a brief answer. On Trivia
 
 ## 8. Findings about lm-polygraph
 
-Four issues surfaced during this work. They are reported as observations, not as patches — the PR touches no upstream behaviour beyond four single-line registrations.
+Five issues surfaced during this work. They are reported as observations, not as patches — the PR touches no upstream behaviour beyond four single-line registrations.
 
 **8.1 Non-finite logits are silently replaced by a uniform distribution.** `_SanitizeLogitsProcessor` rewrites a fully non-finite row to zeros. Downstream, `greedy_log_likelihoods` are then finite and constant at exactly `−ln V = −11.9312`, and the generation decodes as token id 0 repeated. A numerically unstable run therefore produces plausible-looking numbers instead of an error, and the failure is invisible in precisely the quantities a user would check. This is the mechanism behind the first failed run in this project (72 % of samples corrupted, accuracy exactly 0.000).
 
@@ -263,7 +292,9 @@ Four issues surfaced during this work. They are reported as observations, not as
 
 **8.3 fp16 + `eager` + `output_attentions=True` + left padding produces NaN.** Qwen2 attention computes `attn_weights + causal_mask` with `causal_mask = finfo(dtype).min`; in fp16, `−30 + (−65504)` overflows to `−inf` and softmax yields NaN. `transformers` guards this via `AttentionMaskConverter._unmask_unattended`, but the guard is gated on `sdpa` *and* `not output_attentions` — both violated by any attention-based UQ estimator. This is why §5.4 exists.
 
-**8.4 `PromptCalculator` is registered twice** at `register_default_stat_calculators.py:102` and `:107`. Benign: the dictionary is keyed by stat name, so the second registration overwrites the first idempotently, and the calculator is constructed and run exactly once — verified empirically, not only by reading. It is dead code rather than duplicated computation. Confirmed pre-existing via `git stash`.
+**8.4 The trimmed generation window is not batch-invariant.** `GreedyProbsCalculator` trims at the first EOS *inclusive* (`length = j + 1`). When `pad_token_id == eos_token_id` — the default for many models, and forced here so that continuation-style generations are trimmed at all — a sequence that finishes early at batch size > 1 keeps the first pad that `generate` appended to it. The window, and so every score pooled over it, then depends on which other samples share the batch. Measured here: identical texts in 298/300 samples but identical token windows in only 100/300, with a pad of median `log p` = −21.95 shifting a max-pooled score by +4.6 on average. Baselines and new estimators are affected alike. `test_batched_generation_matches_individual` does not catch it because the stub has no stop condition, so no sequence ever finishes early; adding one reproduces it on CPU. Raised upstream, with the question of whether the trim should stop at the first token generated *after* a sequence was marked finished.
+
+**8.5 `PromptCalculator` is registered twice** at `register_default_stat_calculators.py:102` and `:107`. Benign: the dictionary is keyed by stat name, so the second registration overwrites the first idempotently, and the calculator is constructed and run exactly once — verified empirically, not only by reading. It is dead code rather than duplicated computation. Confirmed pre-existing via `git stash`.
 
 ---
 

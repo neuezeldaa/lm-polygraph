@@ -4,7 +4,7 @@ For a fresh session. Facts are recoverable from the code and `runs/`; **decision
 and dead ends are not**, and re-litigating them is the main way to waste time
 here. This document is those.
 
-**The empirical work is closed. No re-runs are needed or wanted.**
+**The empirical work was closed; the PR review reopened it.** ArtemVazh requested changes (remove the extra forward pass, fix the prompt formatting in instruct mode, re-run on the instruct dataset with AlignScore), and checking those turned up a padding artefact that invalidates part of §6.1 of the report. One more GPU pass is needed. The plan is in `C:\Users\Roman\.claude\plans\valiant-booping-chipmunk.md`.
 
 ---
 
@@ -13,7 +13,7 @@ here. This document is those.
 | | |
 |---|---|
 | Base | `upstream/main` = `efea882d810d07770e71d3a80e02416d09751435` |
-| PR branch | `spilled-energy` = `d39a04ff` — 21 files, **+1819, 0 deletions** |
+| PR branch | `spilled-energy` = `22b3469a` — squashed, 15 files, **+1435, 0 deletions**; pre-squash history kept at `backup/spilled-energy-presquash` = `d39a04ff` (21 files, +1819) |
 | Experiments branch | `spilled-energy-experiments` — current tip; no hash recorded here, since it moves with every documentation edit including this one. Check with `git rev-parse spilled-energy-experiments` |
 | Remotes | `origin` = `neuezeldaa/lm-polygraph` (fork, public) · `upstream` = `IINemo/lm-polygraph`, **push disabled** |
 
@@ -110,32 +110,62 @@ additionally called with a stale flag and had been failing silently. Fixed:
 **`fp32_projection` is a measured negative result, not a fix.** Introduced on the
 hypothesis that fp16 `lm_head` accumulation dominated the error. It does not:
 energies moved ~0.002 mean and the residual was unchanged (0.18947 vs 0.1895).
-The divergence is in the fp16 hidden states of the body, unreachable without
-running the body in higher precision, which does not fit a T4. Left enabled
-because it is strictly more accurate for ~13 MB. **What actually moves the
-residual is batch size**: 0.0368 at bs=1 vs 0.1993 at bs=4.
+The reason is now known — the residual it targeted was dominated by pad rows (see
+below), not by precision at all. In the reworked implementation, which reads the
+generation's own logits instead of re-running the model, the option disappears.
 
-**The left-padding hypothesis was investigated and refuted.** `EnergyCalculator`
-pads on the **right**, so HF's default `position_ids` are already correct and
-causality keeps pads out of the slice. `test_energy_batch_invariance` passes in
-float32 *and* float16. The A↔C disagreement is conditioning, not misalignment:
-`|θ|≈22.7`, `|Z|≈27.1`, `|ΔE|≈4.2` → ~6.5× amplification, and `max` pooling
-selects the noisiest token. Do not re-open this as a padding bug.
+**The A↔C disagreement is a pad in the pooling window, not fp16 conditioning.**
+This one cost the most and was wrong twice, so read it carefully before touching
+§6.1 of the report:
+
+* The *first* hypothesis, left-padding misalignment inside `EnergyCalculator`,
+  was correctly refuted: it pads on the **right**, HF's `position_ids` are
+  correct, and `test_energy_batch_invariance` passes in float32 and float16.
+* The *second*, that the residual disagreement was fp16 ill-conditioning
+  amplified by `ΔE`, was **wrong**. `GreedyProbsCalculator` trims at the first
+  EOS inclusive; with `eos_token_id == pad_token_id` a sequence that finishes
+  early at bs>1 keeps the first pad `generate` appended. Run A (bs=4) and run C
+  (bs=1) share texts on 298/300 samples but token windows on only 100/300, and
+  198/300 differ by exactly that pad, whose median `log p` is −21.95.
+* Split by that grouping, the disagreement is entirely the pad: on identical
+  windows ρ(A, C) = 1.000 for all four anchors, and the identity residual on
+  real tokens is 0.0393 (bs=4) vs 0.0368 (bs=1) — 1.07×, not the 5.4× that the
+  pooled figure suggested.
+* The primary `_noterm` scores are unaffected (pad counts as a terminator and is
+  dropped): recomputed on exactly the 198 affected samples, all twelve variants
+  reproduce at ρ ≥ 0.9999.
+
+The `|θ|≈22.7`, `|Z|≈27.1`, `|ΔE|≈4.2` amplification (~6.5×) is still real
+arithmetic — it just is not what was being measured. Reproduce the pad on CPU
+with the tiny stub by giving it `stop_strings` that fire at different steps;
+without a stop condition no sequence finishes early, which is why
+`test_batched_generation_matches_individual` never caught it.
 
 ---
 
 ## 4. Open items
 
-1. **REPORT.md is complete and committed.** Both wrong cross-references are
-   fixed and a scan finds no dangling ones; §9 documents the branch split.
+1. **REPORT.md has been corrected for the pad artefact** (§1 item 3, §5.3, §5.5,
+   §6.1 rewritten, §6.2 caveat, §7.1, §7.2, new §8.4). The numbers in §5.2 and §5.3
+   stand — they are measured in the pad-free window and that was verified, not
+   assumed. What changed is the *attribution* in §6.1. Once the instruct re-run
+   lands, the tables need refreshing with its numbers.
 2. **Three upstream issue drafts, split, awaiting review before filing:**
    `harness/UPSTREAM_ISSUE_1_sanitizer.md` (lm-polygraph's bug — the one worth
    filing), `..._2_attention_fp16.md` (framed as *documentation*: the defect is
    transformers' gating, lm-polygraph only exposes it), `..._3_orientation.md`
    (`RenyiNeg`/`FisherRao`/`MeanCondPMI` inverted; framed as a *question*, since
    the intended convention is theirs to state).
-3. **The PR is deliberately unopened** and stays that way until Roman says
-   otherwise.
+3. **The PR is open and has a review from ArtemVazh (changes requested).** Three
+   requests: (a) drop the extra forward pass — have `GreedyProbsCalculator` ask for
+   `output_logits=True` and take the raw logits from the generation pass;
+   (b) `EnergyCalculator._prompt_ids` bypasses `WhiteboxModel.tokenize()` and so
+   skips the chat template when `instruct=True` (measured: 11 tokens vs 40 for the
+   same TriviaQA prompt); (c) re-run with `instruct: true`, the `simple_instruct`
+   dataset and AlignScore, based on
+   `examples/configs/polygraph_eval_triviaqa_simple_instruct.yaml`. All three are
+   correct. **Do not post to the PR or push to the PR branch without Roman's
+   explicit yes** — he posts the replies himself; the draft is prepared for him.
 4. **When the PR description is written, it must state the branch split and the
    reason.** The PR is self-contained for the method and its tests; the ablation
    ladder, the terminator A/B and `harness/` live on
@@ -166,5 +196,8 @@ committing there.
 * Colab's "Save a copy in GitHub" has twice pushed the notebook back and blocked
   a push. The notebook is **generated** by `harness/make_notebook.py`; resolve any
   conflict by regenerating, never by hand-editing the JSON.
-* Upstream code is not modified beyond four single-line registrations. Flag
-  upstream bugs; do not patch them.
+* Upstream code is not modified beyond four single-line registrations — **with
+  one exception the reviewer asked for**: `GreedyProbsCalculator` now also
+  requests `output_logits` and emits the two reduced energy statistics. Anything
+  beyond that (notably the trim in §3) stays a flagged observation until a
+  maintainer asks for a patch.
